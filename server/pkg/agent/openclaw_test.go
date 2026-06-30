@@ -3,10 +3,12 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -1565,5 +1567,66 @@ func TestOpenclawExecuteAllowsCurrentVersion(t *testing.T) {
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("timeout waiting for result")
+	}
+}
+
+// TestCheckOpenclawVersionTimesOutOnHang guards the openclaw analogue of
+// MUL-3812: the version gate runs at the very start of Execute, before the
+// daemon arms its idle watchdog (the watchdog only starts once Execute returns
+// a Session). With no wall-clock cap by default (MUL-3064), an `openclaw
+// --version` that never returns would hang the run forever with zero events
+// and no liveness net — exactly the "it's just hung" report. checkOpenclawVersion
+// must bound the probe and return an error so the run fails fast. The script
+// also backgrounds a child that inherits and holds the stdout pipe open after
+// the parent is killed, exercising the cmd.WaitDelay path that plain context
+// cancellation cannot cover.
+func TestCheckOpenclawVersionTimesOutOnHang(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("relies on a /bin/sh hang script")
+	}
+
+	dir := t.TempDir()
+	script := filepath.Join(dir, "openclaw")
+	pidFile := filepath.Join(dir, "child.pid")
+	// `openclaw --version` hangs forever (`wait`) and backgrounds a child that
+	// inherits and holds our stdout pipe open even after the parent is killed
+	// on timeout — the exact case cmd.WaitDelay must cover. The child records
+	// its PID so Cleanup can reap it instead of leaking a 60s `sleep` into CI.
+	body := fmt.Sprintf("#!/bin/sh\nsleep 60 &\necho $! > %q\nwait\n", pidFile)
+	writeTestExecutable(t, script, []byte(body))
+	t.Cleanup(func() {
+		data, err := os.ReadFile(pidFile)
+		if err != nil {
+			return // child never recorded its PID; nothing to reap
+		}
+		pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+		if err != nil {
+			return
+		}
+		if proc, err := os.FindProcess(pid); err == nil {
+			_ = proc.Kill()
+		}
+	})
+
+	orig := detectVersionTimeout
+	detectVersionTimeout = 200 * time.Millisecond
+	t.Cleanup(func() { detectVersionTimeout = orig })
+
+	done := make(chan error, 1)
+	start := time.Now()
+	go func() {
+		done <- checkOpenclawVersion(context.Background(), script)
+	}()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("expected an error from a hanging --version probe, got nil")
+		}
+		if elapsed := time.Since(start); elapsed > 5*time.Second {
+			t.Fatalf("check took %v; expected it to be bounded by the timeout", elapsed)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("checkOpenclawVersion did not return: version probe is unbounded")
 	}
 }

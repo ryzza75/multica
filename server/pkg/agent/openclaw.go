@@ -231,9 +231,24 @@ func customArgsContains(args []string, flag string) bool {
 // minOpenclawVersion. The returned error becomes the task's failure
 // comment, so the message intentionally names the detected version
 // and the upgrade command.
+//
+// The probe is bounded exactly like detectCLIVersion (MUL-3812). This runs at
+// the very start of Execute — before the daemon arms its idle watchdog, which
+// only starts once Execute returns a Session — so an `openclaw --version` that
+// never returns would hang the whole run with NO liveness net: by default
+// there is no wall-clock cap (MUL-3064), so the task sits at "running" with
+// zero events forever and even the inactivity watchdog never gets to fire. A
+// derived timeout plus WaitDelay (for a node/bun shim that leaves a child
+// holding the stdout pipe open and so defeats plain context cancellation)
+// guarantees this call always returns, turning a wedged probe into a fast,
+// visible task failure instead of an indefinite hang.
 func checkOpenclawVersion(ctx context.Context, execPath string) error {
+	ctx, cancel := context.WithTimeout(ctx, detectVersionTimeout)
+	defer cancel()
+
 	cmd := exec.CommandContext(ctx, execPath, "--version")
 	hideAgentWindow(cmd)
+	cmd.WaitDelay = 2 * time.Second
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("openclaw --version failed: %w", err)
