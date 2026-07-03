@@ -104,6 +104,29 @@ export type {
 } from "./project";
 export type { PinnedItem, PinnedItemType, CreatePinRequest, ReorderPinsRequest } from "./pin";
 export type {
+  KnowledgeStatus,
+  KnowledgeNodeKind,
+  KnowledgeEndpointType,
+  KnowledgeNode,
+  KnowledgeEdge,
+  KnowledgeRef,
+  KnowledgeSource,
+  KnowledgeEvidence,
+  SearchKnowledgeNodesResponse,
+  ListKnowledgeNodesResponse,
+  GetKnowledgeNodeResponse,
+  ListKnowledgeEdgesResponse,
+  GetKnowledgeEdgeResponse,
+  KnowledgeGraphResponse,
+  KnowledgePathResponse,
+  UpdateKnowledgeNodeRequest,
+  SearchKnowledgeParams,
+  ListKnowledgeNodesParams,
+  ListKnowledgeEdgesParams,
+  KnowledgeGraphParams,
+  KnowledgePathParams,
+} from "./knowledge";
+export type {
   GitHubInstallation,
   GitHubMergeableState,
   GitHubPullRequest,

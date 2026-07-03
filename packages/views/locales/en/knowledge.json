@@ -1,0 +1,44 @@
+{
+  "title": "Knowledge",
+  "tabs": {
+    "explore": "Explore",
+    "path": "Path",
+    "review": "Review"
+  },
+  "search": {
+    "placeholder": "Search the knowledge graph…",
+    "no_results": "No matching nodes"
+  },
+  "filters": {
+    "hops": "Hops",
+    "include_proposed": "Include proposed"
+  },
+  "explore": {
+    "empty": "Search for a node to explore its graph",
+    "truncated": "The graph was truncated — lower hops or focus a smaller area to see more."
+  },
+  "panel": {
+    "summary": "Summary",
+    "aliases": "Aliases",
+    "connections": "Connections",
+    "no_connections": "No connections yet",
+    "evidence": "Evidence",
+    "approve": "Approve",
+    "reject": "Reject",
+    "close": "Close"
+  },
+  "review": {
+    "proposed_nodes": "Proposed nodes",
+    "proposed_edges": "Proposed edges",
+    "approve": "Approve",
+    "reject": "Reject",
+    "empty": "Nothing is waiting for review"
+  },
+  "path": {
+    "find": "Find path",
+    "source": "Source",
+    "target": "Target",
+    "not_found": "No path found between these nodes",
+    "truncated": "The search was truncated before covering the whole graph"
+  }
+}

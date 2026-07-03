@@ -1,0 +1,44 @@
+{
+  "title": "ナレッジグラフ",
+  "tabs": {
+    "explore": "探索",
+    "path": "パス",
+    "review": "レビュー"
+  },
+  "search": {
+    "placeholder": "ナレッジグラフを検索…",
+    "no_results": "一致するノードがありません"
+  },
+  "filters": {
+    "hops": "ホップ数",
+    "include_proposed": "提案中の項目を含める"
+  },
+  "explore": {
+    "empty": "ノードを検索してグラフを探索します",
+    "truncated": "グラフは省略されています。ホップ数を減らすか、範囲を絞ってください。"
+  },
+  "panel": {
+    "summary": "概要",
+    "aliases": "別名",
+    "connections": "関連",
+    "no_connections": "まだ関連がありません",
+    "evidence": "根拠",
+    "approve": "承認",
+    "reject": "却下",
+    "close": "閉じる"
+  },
+  "review": {
+    "proposed_nodes": "提案中のノード",
+    "proposed_edges": "提案中の関係",
+    "approve": "承認",
+    "reject": "却下",
+    "empty": "レビュー待ちの項目はありません"
+  },
+  "path": {
+    "find": "パスを検索",
+    "source": "始点",
+    "target": "終点",
+    "not_found": "この 2 つのノード間にパスが見つかりませんでした",
+    "truncated": "グラフ全体を探索する前に検索が打ち切られました"
+  }
+}

@@ -14,9 +14,18 @@ import type {
   CreateAgentFromTemplateResponse,
   CreateBillingCheckoutSessionResponse,
   CreateBillingPortalSessionResponse,
+  GetKnowledgeEdgeResponse,
+  GetKnowledgeNodeResponse,
   GroupedIssuesResponse,
   InboxWorkspaceUnread,
+  KnowledgeEdge,
+  KnowledgeGraphResponse,
+  KnowledgeNode,
+  KnowledgePathResponse,
   ListIssuesResponse,
+  ListKnowledgeEdgesResponse,
+  ListKnowledgeNodesResponse,
+  SearchKnowledgeNodesResponse,
   ListWebhookDeliveriesResponse,
   SearchIssuesResponse,
   SearchProjectsResponse,
@@ -1102,4 +1111,199 @@ export const CreateBillingPortalSessionResponseSchema = z.object({
 
 export const EMPTY_CREATE_BILLING_PORTAL_SESSION_RESPONSE: CreateBillingPortalSessionResponse = {
   url: "",
+};
+
+// ── Knowledge graph ──
+// Lenient on purpose: kind/status/predicate stay z.string() (server-driven
+// enums), nullable text columns tolerate omission, and collections default
+// to [] so a partial response degrades instead of white-screening.
+
+export const KnowledgeNodeSchema = z.object({
+  id: z.string(),
+  workspace_id: z.string(),
+  kind: z.string(),
+  slug: z.string(),
+  title: z.string(),
+  aliases: z.array(z.string()).default([]),
+  summary: z.string().nullable().optional(),
+  content: z.string().nullable().optional(),
+  attrs: z.record(z.string(), z.unknown()).default({}),
+  status: z.string(),
+  merged_into: z.string().nullable().optional(),
+  created_by_type: z.string(),
+  created_by_id: z.string(),
+  created_at: z.string(),
+  updated_at: z.string(),
+}).loose();
+
+export const KnowledgeEdgeSchema = z.object({
+  id: z.string(),
+  workspace_id: z.string(),
+  src_type: z.string(),
+  src_id: z.string(),
+  dst_type: z.string(),
+  dst_id: z.string(),
+  predicate: z.string(),
+  confidence: z.number().default(0),
+  attrs: z.record(z.string(), z.unknown()).default({}),
+  status: z.string(),
+  valid_from: z.string().nullable().optional(),
+  valid_until: z.string().nullable().optional(),
+  superseded_by: z.string().nullable().optional(),
+  last_affirmed_at: z.string().default(""),
+  created_by_type: z.string(),
+  created_by_id: z.string(),
+  created_at: z.string(),
+}).loose();
+
+const KnowledgeRefSchema = z.object({
+  type: z.string(),
+  id: z.string(),
+}).loose();
+
+export const SearchKnowledgeNodesResponseSchema = z.object({
+  nodes: z.array(KnowledgeNodeSchema).default([]),
+  total: z.number().default(0),
+  semantic: z.boolean().default(false),
+}).loose();
+
+export const EMPTY_SEARCH_KNOWLEDGE_NODES_RESPONSE: SearchKnowledgeNodesResponse = {
+  nodes: [],
+  total: 0,
+  semantic: false,
+};
+
+export const ListKnowledgeNodesResponseSchema = z.object({
+  nodes: z.array(KnowledgeNodeSchema).default([]),
+  total: z.number().default(0),
+}).loose();
+
+export const EMPTY_LIST_KNOWLEDGE_NODES_RESPONSE: ListKnowledgeNodesResponse = {
+  nodes: [],
+  total: 0,
+};
+
+export const GetKnowledgeNodeResponseSchema = z.object({
+  node: KnowledgeNodeSchema,
+}).loose();
+
+export const EMPTY_KNOWLEDGE_NODE: KnowledgeNode = {
+  id: "",
+  workspace_id: "",
+  kind: "",
+  slug: "",
+  title: "",
+  aliases: [],
+  summary: null,
+  content: null,
+  attrs: {},
+  status: "",
+  merged_into: null,
+  created_by_type: "",
+  created_by_id: "",
+  created_at: "",
+  updated_at: "",
+};
+
+export const EMPTY_GET_KNOWLEDGE_NODE_RESPONSE: GetKnowledgeNodeResponse = {
+  node: EMPTY_KNOWLEDGE_NODE,
+};
+
+export const ListKnowledgeEdgesResponseSchema = z.object({
+  edges: z.array(KnowledgeEdgeSchema).default([]),
+  total: z.number().default(0),
+}).loose();
+
+export const EMPTY_LIST_KNOWLEDGE_EDGES_RESPONSE: ListKnowledgeEdgesResponse = {
+  edges: [],
+  total: 0,
+};
+
+const KnowledgeSourceSchema = z.object({
+  id: z.string(),
+  source_type: z.string().default(""),
+  source_ref: z.unknown().optional(),
+  title: z.string().nullable().optional(),
+  content: z.string().nullable().optional(),
+  created_at: z.string().default(""),
+}).loose();
+
+const KnowledgeEvidenceSchema = z.object({
+  id: z.string(),
+  stance: z.string().default(""),
+  note: z.string().default(""),
+  created_at: z.string().default(""),
+  source: KnowledgeSourceSchema,
+}).loose();
+
+export const GetKnowledgeEdgeResponseSchema = z.object({
+  edge: KnowledgeEdgeSchema,
+  evidence: z.array(KnowledgeEvidenceSchema).default([]),
+}).loose();
+
+export const KnowledgeEdgeEnvelopeSchema = z.object({
+  edge: KnowledgeEdgeSchema,
+}).loose();
+
+export const EMPTY_KNOWLEDGE_EDGE: KnowledgeEdge = {
+  id: "",
+  workspace_id: "",
+  src_type: "",
+  src_id: "",
+  dst_type: "",
+  dst_id: "",
+  predicate: "",
+  confidence: 0,
+  attrs: {},
+  status: "",
+  valid_from: null,
+  valid_until: null,
+  superseded_by: null,
+  last_affirmed_at: "",
+  created_by_type: "",
+  created_by_id: "",
+  created_at: "",
+};
+
+export const EMPTY_GET_KNOWLEDGE_EDGE_RESPONSE: GetKnowledgeEdgeResponse = {
+  edge: EMPTY_KNOWLEDGE_EDGE,
+  evidence: [],
+};
+
+export const KnowledgeGraphResponseSchema = z.object({
+  focus: KnowledgeRefSchema.nullable().optional(),
+  nodes: z.array(KnowledgeNodeSchema).default([]),
+  refs: z.array(KnowledgeRefSchema).default([]),
+  edges: z.array(KnowledgeEdgeSchema).default([]),
+  hops: z.number().default(0),
+  truncated: z.boolean().default(false),
+}).loose();
+
+export const EMPTY_KNOWLEDGE_GRAPH_RESPONSE: KnowledgeGraphResponse = {
+  focus: null,
+  nodes: [],
+  refs: [],
+  edges: [],
+  hops: 0,
+  truncated: false,
+};
+
+// found=false responses carry only {found, truncated}; the defaults fill
+// the rest so one schema covers both shapes.
+export const KnowledgePathResponseSchema = z.object({
+  found: z.boolean().default(false),
+  hops: z.number().default(0),
+  edges: z.array(KnowledgeEdgeSchema).default([]),
+  nodes: z.array(KnowledgeNodeSchema).default([]),
+  refs: z.array(KnowledgeRefSchema).default([]),
+  truncated: z.boolean().default(false),
+}).loose();
+
+export const EMPTY_KNOWLEDGE_PATH_RESPONSE: KnowledgePathResponse = {
+  found: false,
+  hops: 0,
+  edges: [],
+  nodes: [],
+  refs: [],
+  truncated: false,
 };

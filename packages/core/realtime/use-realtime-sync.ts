@@ -11,6 +11,7 @@ import { defaultStorage } from "../platform/storage";
 import { getCurrentWsId, getCurrentSlug } from "../platform/workspace-storage";
 import { issueKeys } from "../issues/queries";
 import { projectKeys } from "../projects/queries";
+import { knowledgeKeys } from "../knowledge/queries";
 import { pinKeys } from "../pins/queries";
 import { autopilotKeys } from "../autopilots/queries";
 import { runtimeKeys } from "../runtimes/queries";
@@ -446,6 +447,17 @@ export function useRealtimeSync(
       project: () => {
         const wsId = getCurrentWsId();
         if (wsId) qc.invalidateQueries({ queryKey: projectKeys.all(wsId) });
+      },
+      // knowledge_node:* / knowledge_edge:* — graph, search, and review
+      // queries all hang off the same root key; agents write concurrently
+      // so a coarse invalidate keeps the canvas honest.
+      knowledge_node: () => {
+        const wsId = getCurrentWsId();
+        if (wsId) qc.invalidateQueries({ queryKey: knowledgeKeys.all(wsId) });
+      },
+      knowledge_edge: () => {
+        const wsId = getCurrentWsId();
+        if (wsId) qc.invalidateQueries({ queryKey: knowledgeKeys.all(wsId) });
       },
       squad: () => {
         const wsId = getCurrentWsId();
