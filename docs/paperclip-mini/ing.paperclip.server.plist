@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  LaunchAgent: keep Paperclip running (default instance, authenticated/private,
+  loopback:3200) and restart it if it dies or after login.
+
+  Install (replace /Users/jarvis if your home differs):
+    cp docs/paperclip-mini/ing.paperclip.server.plist ~/Library/LaunchAgents/
+    cp docs/paperclip-mini/paperclip-launchd-wrapper.sh ~/paperclip/  # or keep in repo and fix ProgramArguments path
+    chmod +x ~/paperclip/paperclip-launchd-wrapper.sh
+    launchctl load  ~/Library/LaunchAgents/ing.paperclip.server.plist   # start
+    launchctl unload ~/Library/LaunchAgents/ing.paperclip.server.plist  # stop
+
+  TEST BEFORE TRUSTING: after `launchctl load`, run
+    curl -s http://127.0.0.1:3200/api/health
+  and watch `tail -f ~/paperclip-dev.log` for ~1 min to confirm it is NOT
+  restart-looping. If it loops, the wrapper's exec is backgrounding — tell
+  Claude and we will switch the KeepAlive strategy.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>ing.paperclip.server</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>/Users/jarvis/paperclip/paperclip-launchd-wrapper.sh</string>
+    </array>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/jarvis/paperclip</string>
+
+    <key>StandardOutPath</key>
+    <string>/Users/jarvis/paperclip-dev.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/jarvis/paperclip-dev.log</string>
+
+    <!-- Give the embedded Postgres a moment before launchd considers a fast exit a crash. -->
+    <key>ThrottleInterval</key>
+    <integer>30</integer>
+</dict>
+</plist>
