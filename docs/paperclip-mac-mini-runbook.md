@@ -46,6 +46,23 @@ Phone / laptop (Tailscale)
   In Paperclip, Hermes agents use adapter `hermes_local` with model `auto`,
   which defers model/provider resolution to that file.
 
+## One-shot cutover: `paperclip-cutover.sh`
+
+`docs/paperclip-mini/paperclip-cutover.sh` runs the whole "remove Multica, make
+Paperclip the sole app" sequence in one go and prints a PASS/FAIL report at the
+end. Run it **on the mini** (the tailnet hostnames only resolve from a device on
+the tailnet):
+
+```sh
+bash ~/paperclip/ops/paperclip-cutover.sh          # asks before the teardown
+bash ~/paperclip/ops/paperclip-cutover.sh --verify # re-run only the checks, any time
+```
+
+It decommissions Multica, sets Paperclip's port to 3100 + allowlists both
+hostnames, invokes `paperclip-up.sh`, then verifies Multica is gone, the ports
+are right, local health is authenticated, and both HTTPS URLs answer. The manual
+equivalents for each step are documented below.
+
 ## Decommissioning Multica (done 2026-07-03)
 
 Multica ran as the `multica` Docker Compose project (services `postgres`,
