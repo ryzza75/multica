@@ -34,6 +34,20 @@ Phone / laptop (Tailscale)
   In Paperclip, Hermes agents use adapter `hermes_local` with model `auto`,
   which defers model/provider resolution to that file.
 
+## Quick recovery: `paperclip-up.sh`
+
+`docs/paperclip-mini/paperclip-up.sh` does the full clean bring-up in one shot:
+kills orphaned watchers, frees the ports, starts the default instance
+(authenticated/private, loopback:3200), and re-asserts the Tailscale service.
+Copy it to the mini and run it whenever Paperclip is misbehaving or after a
+reboot:
+
+```sh
+bash ~/multica/docs/paperclip-mini/paperclip-up.sh   # or wherever the repo is checked out
+```
+
+The manual equivalents are below.
+
 ## Start / stop (until launchd service exists)
 
 All `pnpm` commands must run from the paperclip checkout: `cd ~/paperclip`.
@@ -127,7 +141,52 @@ One-time state, already done — recorded here for rebuilds:
    persist. Re-run the start line and the advertise line. (TODO: launchd
    plists for both.)
 
-8. **Board claim / "No company access" after sign-in** — account exists but
+8. **Adapter env check fails: `Python 3.9.6 found — requires 3.10+`** — the
+   *server process's* inherited PATH resolves `python3` to macOS system Python,
+   even though Hermes itself runs on its own 3.11. Hermes's bundled Python does
+   not count; the probe runs bare `python3 --version`. Fix: `brew install python`
+   so `/opt/homebrew/bin/python3` (3.10+) is first on PATH, then **restart the
+   server from that same terminal** so it inherits the PATH (the running process
+   keeps its old PATH forever). `paperclip-up.sh` prepends the Homebrew bin dir
+   for this reason.
+
+9. **Endless port roulette / server keeps landing on 3201 / `pnpm dev` boots a
+   `/tmp/pcvt-*/vt-*` test instance** — ROOT CAUSE of the 2026-07-03 night-long
+   fight. Each `pnpm dev` whose parent was killed left an **orphaned file
+   watcher** (`tsx ... watch ... src/index.ts`, reparented to PPID 1) that
+   respawned a server. Combined with the dev-runner's idempotency ("if a dev
+   runner is already alive, report it instead of starting a new one"), every new
+   `pnpm dev` *deferred to a leftover orphan* — including a stray `vt-*` test
+   instance from an agent's test run — instead of starting the real default
+   instance. Symptom: 3200 empty, an unkillable-looking server reappearing on
+   3201, health showing `local_trusted` or a `/tmp` backup dir. Fix: kill the
+   whole forest, then start exactly one pinned server:
+
+   ```sh
+   pkill -f "tsx/dist/cli.mjs watch.*src/index.ts"
+   pkill -f "dev-runner.ts"; pkill -f "dev-watch.ts"; pkill -f "@paperclipai/server dev:watch"
+   lsof -tnP -iTCP:3200 -sTCP:LISTEN | xargs -r kill
+   lsof -tnP -iTCP:3201 -sTCP:LISTEN | xargs -r kill
+   # confirm zero, then:
+   PAPERCLIP_HOME="$HOME/.paperclip" PAPERCLIP_INSTANCE_ID=default \
+     nohup pnpm dev --authenticated-private --bind loopback < /dev/null > ~/paperclip-dev.log 2>&1 &
+   ```
+
+   Diagnose leftovers with:
+   `ps -A -o pid,ppid,etime,command | grep -E "tsx.*src/index.ts|dev-runner|dev-watch" | grep -v grep`
+   — orphans show `PPID 1`. `paperclip-up.sh` automates this.
+
+10. **Governance: agent editing the live checkout** — the `vt-*` test instance
+    and stray watchers traced back to a Paperclip **agent operating inside
+    `~/paperclip` itself** (commits `HOM-13`/`HOM-9`, `server/Day`,
+    `server/ui-dist/`, running the test suite which spun up `/tmp` Postgres +
+    servers on 3201). An agent must NOT have the live Paperclip checkout as its
+    workspace — it fights the platform hosting it. Fix: pause the agent, unassign
+    its in-progress `HOM-*` issues, and give it an isolated project workspace
+    (git worktree / operator branch) instead of `~/paperclip`. Decide whether to
+    keep, upstream, or `git reset --hard origin/master` its commits.
+
+11. **Board claim / "No company access" after sign-in** — account exists but
    isn't instance admin. Get the newest one-time claim URL:
    `grep -o 'board-claim/[^ ]*' ~/paperclip-dev.log | tail -1` and open it as
    `https://paperclip.tail195627.ts.net/board-claim/<token>?code=<code>`
