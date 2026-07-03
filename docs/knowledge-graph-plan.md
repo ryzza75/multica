@@ -33,7 +33,7 @@ creates the latter:
 | pgvector availability | **Provisioned everywhere but unused**: CI (`.github/workflows/ci.yml`), `docker-compose.yml`, `docker-compose.selfhost.yml` all run `pgvector/pgvector:pg17`. Enabling the extension is a migration away. |
 | Graph edges | Bespoke per-pair tables only. `issue_dependency` (`blocks`/`blocked_by`/`related`) is the closest existing typed edge. No generic edge table, no resource↔resource or resource↔issue links. |
 | Graph visualization | **No dependency exists** (no d3/cytoscape/sigma/react-flow anywhere). |
-| Runtime-native agent memory | **Exists, but at the runtime level and outside Multica's control.** Codex ships a native auto-memory subsystem (wiki/LLM-style: `$CODEX_HOME/memories/raw_memories.md` + sqlite state); the daemon deliberately disables it in managed tasks (`execenv/codex_memory.go`) because it is opaque, uneditable from any Multica UI, and leaked host-project memories across workspaces (multica#3130). Escape hatch: `MULTICA_CODEX_MEMORY=1`. Hermes likewise maintains its own memory/context outside daemon control — it self-loads AGENTS.md / `.agent_context` from cwd (the daemon skips `SystemPrompt` for it, `agent/hermes.go`), and no `hermes_memory.go` equivalent exists to scope or disable its native memory. `codex_memory.go`'s header names the intended end state: "a Multica-owned, user-visible, project- or issue-scoped memory store." |
+| Runtime-native agent memory | **Exists, but at the runtime level and outside Multica's control — and each runtime is handled differently today.** Codex ships a native auto-memory subsystem (`$CODEX_HOME/memories/raw_memories.md` + sqlite state); the daemon deliberately disables it in managed tasks (`execenv/codex_memory.go`) because it is opaque, uneditable from any Multica UI, and leaked host-project memories across workspaces (multica#3130). Escape hatch: `MULTICA_CODEX_MEMORY=1`. OpenClaw keeps wiki/markdown-style memory in the agent workspace (SOUL.md, MEMORY.md, standing orders, daily memory files); the daemon pins every OpenClaw agent workspace to the task workdir for per-task skill discovery, with the documented cost that host-level SOUL.md / MEMORY.md are **not visible** to in-task runs — "task isolation wins over host carry-over" (`execenv/openclaw_config.go:157-167`). Hermes self-loads AGENTS.md / `.agent_context` from cwd (the daemon skips `SystemPrompt` for it, `agent/hermes.go`); no daemon-side scoping of its native memory exists. `codex_memory.go`'s header names the intended end state: "a Multica-owned, user-visible, project- or issue-scoped memory store." |
 | Agent context injection | Exists and is the key integration seam: `server/internal/daemon/execenv/context.go` writes `.agent_context/issue_context.md`, provider-native skills, and `.multica/project/resources.json` into every task's working directory. |
 | Agent write path | Exists: the `multica` CLI + builtin skills (`server/internal/service/builtin_skills/*`) teach every runtime, including Hermes (ACP backend, `server/pkg/agent/hermes.go`), how to mutate durable workspace state. |
 
@@ -69,19 +69,28 @@ with hop and fan-out limits. Postgres is sufficient for the target scale
 ### 3.1 The graph IS the memory store (relationship to Hermes/Codex native memory)
 
 Runtime-native memory already exists — Hermes keeps its own memory/context,
-Codex ships wiki/LLM-style auto-memory — and the daemon's stance on it is
-already on record in `codex_memory.go`: native memory is disabled in managed
-tasks because it is opaque, unauditable, and leaks across workspaces, and the
-long-term answer is a Multica-owned, user-visible, scoped memory store.
+Codex ships LLM-style auto-memory, OpenClaw keeps wiki-style markdown memory
+(SOUL.md / MEMORY.md / standing orders) in its agent workspace — and the
+daemon's stance on it is already on record: Codex native memory is disabled
+in managed tasks (`codex_memory.go`) because it is opaque, unauditable, and
+leaks across workspaces; OpenClaw's host memory is cut off in managed tasks
+as a side effect of workspace pinning ("task isolation wins over host
+carry-over", `openclaw_config.go`); and the long-term answer named in
+`codex_memory.go` is a Multica-owned, user-visible, scoped memory store.
 
 **This knowledge graph is that store.** Three consequences:
 
 1. **Native memory is an ingestion source, never a peer store.** Runtime
-   memories (Hermes memory, Codex `raw_memories.md` where a user has opted it
-   back on) enter the graph as `knowledge_source` rows with
+   memories (OpenClaw MEMORY.md / daily memory files written during a task,
+   Hermes memory, Codex `raw_memories.md` where a user has opted it back on)
+   enter the graph as `knowledge_source` rows with
    `source_type='runtime_memory'` and flow through the same extraction →
    `proposed` → curation pipeline as everything else. They are treated as
-   *claims by an agent*, with provenance, not as truth.
+   *claims by an agent*, with provenance, not as truth. OpenClaw is the
+   easiest to ingest: its memory is plain markdown in the (daemon-pinned)
+   task workspace, so a teardown hook can capture it verbatim. A one-time
+   import of existing host-level OpenClaw MEMORY.md files is also the
+   cheapest way to seed the graph with knowledge already accumulated.
 2. **Write-back replaces private memory.** The `multica-knowledge` builtin
    skill (Phase 2) teaches agents to persist durable learnings to the graph
    via the CLI instead of relying on their runtime's private memory. That is
@@ -98,9 +107,21 @@ long-term answer is a Multica-owned, user-visible, scoped memory store.
    tasks, env-var escape hatch) for the same cross-task/cross-workspace
    leak reasons.
 
+4. **Graph-backed memory injection, per runtime's native read path.** The
+   daemon already controls what each runtime sees as its context. For
+   OpenClaw this is especially clean: because every agent workspace is
+   pinned to the task workdir, execenv can render relevant graph knowledge
+   into a synthesized per-task `MEMORY.md` (and standing-orders equivalents)
+   that OpenClaw reads natively — restoring exactly what workspace pinning
+   took away, except the memory is now curated, provenance-backed, and
+   workspace-scoped instead of uncontrolled host carry-over. Other runtimes
+   get the generic `.multica/knowledge/context.json` + brief section from
+   Phase 3; OpenClaw additionally gets the native-format render.
+
 The wiki angle follows from the same decision: a node's markdown `content` is
 the user-visible, editable "memory page" — what runtime auto-memory keeps in
-hidden files, the graph keeps as wiki pages with provenance and history.
+hidden files (or per-agent workspace files that managed tasks can't see), the
+graph keeps as wiki pages with provenance and history.
 
 ## 4. Ontology and standards
 
@@ -318,7 +339,10 @@ runtime's working directory (`execenv/context.go`).
   artifacts from the working directory as `knowledge_source` rows
   (`source_type='runtime_memory'`, ref carries agent/task/runtime), feeding
   the same extraction pipeline. Opt-in per agent, since it reads what the
-  runtime chose to remember.
+  runtime chose to remember. For OpenClaw this means the workspace
+  MEMORY.md / daily memory files (plain markdown, trivially capturable);
+  include a one-time `multica knowledge import` path for existing host-level
+  OpenClaw memory to seed the graph.
 - **Curation queue**: `status='proposed'` items surface in a review list
   (Phase 4 UI) with accept/reject/merge actions; a scheduled "gardener" agent
   can also merge obvious duplicates and fill missing summaries, using the same
@@ -338,6 +362,10 @@ runtime's working directory (`execenv/context.go`).
   with slug, summary, and top edges. The runtime brief gains a short
   `## Knowledge Context` section. This closes the loop: agents read graph
   knowledge without being asked, in every runtime including Hermes.
+- **OpenClaw native render** (per §3.1 point 4): for OpenClaw tasks, also
+  render the same top-K knowledge into a synthesized per-task `MEMORY.md` in
+  the pinned workspace so OpenClaw consumes it through its native memory
+  read path. Tracked in the sidecar manifest like other daemon-written files.
 
 ### Phase 4 — Graph visualization (web + desktop)
 
