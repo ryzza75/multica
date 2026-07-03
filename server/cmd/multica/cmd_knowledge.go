@@ -84,6 +84,35 @@ var knowledgePathCmd = &cobra.Command{
 	RunE:  runKnowledgePath,
 }
 
+var knowledgeReviewCmd = &cobra.Command{
+	Use:   "review",
+	Short: "Curate proposed knowledge (members only)",
+}
+
+var knowledgeReviewListCmd = &cobra.Command{
+	Use:   "list",
+	Short: "List proposed nodes and edges awaiting review",
+	RunE:  runKnowledgeReviewList,
+}
+
+var knowledgeReviewApproveCmd = &cobra.Command{
+	Use:   "approve <node|edge> <ref>",
+	Short: "Promote a proposed node or edge to confirmed",
+	Args:  exactArgs(2),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		return runKnowledgeReviewSetStatus(cmd, args, "confirmed")
+	},
+}
+
+var knowledgeReviewRejectCmd = &cobra.Command{
+	Use:   "reject <node|edge> <ref>",
+	Short: "Reject a proposed node or edge",
+	Args:  exactArgs(2),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		return runKnowledgeReviewSetStatus(cmd, args, "rejected")
+	},
+}
+
 func runKnowledgeSearch(cmd *cobra.Command, args []string) error {
 	client, err := newAPIClient(cmd)
 	if err != nil {
@@ -327,6 +356,61 @@ func runKnowledgePath(cmd *cobra.Command, args []string) error {
 	return cli.PrintJSON(os.Stdout, result)
 }
 
+func runKnowledgeReviewList(cmd *cobra.Command, args []string) error {
+	client, err := newAPIClient(cmd)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := cli.APIContext(context.Background())
+	defer cancel()
+
+	limit, _ := cmd.Flags().GetInt("limit")
+	params := url.Values{}
+	params.Set("status", "proposed")
+	if limit > 0 {
+		params.Set("limit", fmt.Sprintf("%d", limit))
+	}
+	var nodes map[string]any
+	if err := client.GetJSON(ctx, "/api/knowledge/nodes?"+params.Encode(), &nodes); err != nil {
+		return fmt.Errorf("list proposed nodes: %w", err)
+	}
+	var edges map[string]any
+	if err := client.GetJSON(ctx, "/api/knowledge/edges?"+params.Encode(), &edges); err != nil {
+		return fmt.Errorf("list proposed edges: %w", err)
+	}
+	return cli.PrintJSON(os.Stdout, map[string]any{
+		"nodes": nodes["nodes"],
+		"edges": edges["edges"],
+	})
+}
+
+func runKnowledgeReviewSetStatus(cmd *cobra.Command, args []string, status string) error {
+	client, err := newAPIClient(cmd)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := cli.APIContext(context.Background())
+	defer cancel()
+
+	kind, ref := strings.TrimSpace(args[0]), strings.TrimSpace(args[1])
+	var result map[string]any
+	switch kind {
+	case "node":
+		body := map[string]any{"status": status}
+		if err := client.PutJSON(ctx, "/api/knowledge/nodes/"+url.PathEscape(ref), body, &result); err != nil {
+			return fmt.Errorf("set node status: %w", err)
+		}
+	case "edge":
+		body := map[string]any{"status": status}
+		if err := client.PutJSON(ctx, "/api/knowledge/edges/"+url.PathEscape(ref)+"/status", body, &result); err != nil {
+			return fmt.Errorf("set edge status: %w", err)
+		}
+	default:
+		return fmt.Errorf("first argument must be node or edge, got %q", kind)
+	}
+	return cli.PrintJSON(os.Stdout, result)
+}
+
 // jsonRawFlag lets a --attrs '{"k":"v"}' flag pass through as a JSON value
 // rather than a quoted string.
 func jsonRawFlag(v string) any {
@@ -345,6 +429,13 @@ func init() {
 	knowledgeCmd.AddCommand(knowledgeEdgeCmd)
 	knowledgeCmd.AddCommand(knowledgeGraphCmd)
 	knowledgeCmd.AddCommand(knowledgePathCmd)
+	knowledgeCmd.AddCommand(knowledgeReviewCmd)
+
+	knowledgeReviewCmd.AddCommand(knowledgeReviewListCmd)
+	knowledgeReviewCmd.AddCommand(knowledgeReviewApproveCmd)
+	knowledgeReviewCmd.AddCommand(knowledgeReviewRejectCmd)
+
+	knowledgeReviewListCmd.Flags().Int("limit", 100, "Maximum results per list")
 
 	knowledgeNodeCmd.AddCommand(knowledgeNodeAddCmd)
 	knowledgeNodeCmd.AddCommand(knowledgeNodeGetCmd)

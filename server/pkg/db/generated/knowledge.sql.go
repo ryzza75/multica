@@ -596,6 +596,61 @@ func (q *Queries) GetLiveKnowledgeEdgeByEndpoints(ctx context.Context, arg GetLi
 	return i, err
 }
 
+const listKnowledgeEdgesByStatus = `-- name: ListKnowledgeEdgesByStatus :many
+SELECT id, workspace_id, src_type, src_id, dst_type, dst_id, predicate, confidence, attrs, status, valid_from, valid_until, superseded_by, last_affirmed_at, created_by_type, created_by_id, created_at FROM knowledge_edge
+WHERE workspace_id = $1
+  AND status = $2
+  AND valid_until IS NULL
+ORDER BY created_at DESC
+LIMIT $3
+`
+
+type ListKnowledgeEdgesByStatusParams struct {
+	WorkspaceID pgtype.UUID `json:"workspace_id"`
+	Status      string      `json:"status"`
+	Limit       int32       `json:"limit"`
+}
+
+// Review-queue listing: live edges in a given status across the workspace
+// (proposed = awaiting human review).
+func (q *Queries) ListKnowledgeEdgesByStatus(ctx context.Context, arg ListKnowledgeEdgesByStatusParams) ([]KnowledgeEdge, error) {
+	rows, err := q.db.Query(ctx, listKnowledgeEdgesByStatus, arg.WorkspaceID, arg.Status, arg.Limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []KnowledgeEdge{}
+	for rows.Next() {
+		var i KnowledgeEdge
+		if err := rows.Scan(
+			&i.ID,
+			&i.WorkspaceID,
+			&i.SrcType,
+			&i.SrcID,
+			&i.DstType,
+			&i.DstID,
+			&i.Predicate,
+			&i.Confidence,
+			&i.Attrs,
+			&i.Status,
+			&i.ValidFrom,
+			&i.ValidUntil,
+			&i.SupersededBy,
+			&i.LastAffirmedAt,
+			&i.CreatedByType,
+			&i.CreatedByID,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listKnowledgeEdgesForFrontier = `-- name: ListKnowledgeEdgesForFrontier :many
 SELECT id, workspace_id, src_type, src_id, dst_type, dst_id, predicate, confidence, attrs, status, valid_from, valid_until, superseded_by, last_affirmed_at, created_by_type, created_by_id, created_at FROM knowledge_edge
 WHERE workspace_id = $1

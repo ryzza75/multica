@@ -350,3 +350,109 @@ func TestKnowledgeNodeMerge(t *testing.T) {
 		t.Fatalf("winner should hold the moved edge: %s", rec.Body.String())
 	}
 }
+
+func handlerTestAgentID(t *testing.T) string {
+	t.Helper()
+	var agentID string
+	if err := testPool.QueryRow(context.Background(),
+		`SELECT id FROM agent WHERE workspace_id = $1 ORDER BY created_at ASC LIMIT 1`,
+		testWorkspaceID,
+	).Scan(&agentID); err != nil {
+		t.Fatalf("load handler test agent: %v", err)
+	}
+	return agentID
+}
+
+func TestKnowledgeAgentTrustGateAndReview(t *testing.T) {
+	if testHandler == nil {
+		t.Skip("database not available")
+	}
+	cleanupKnowledgeRows(t)
+	agentID := handlerTestAgentID(t)
+
+	// Agent-created node lands as proposed regardless of requested status.
+	req := newRequest("POST", "/api/knowledge/nodes", map[string]any{
+		"kind": "concept", "title": "Agent Proposed Concept",
+		"status": "confirmed", "confirm_new": true,
+	})
+	req.Header.Set("X-Actor-Source", "task_token")
+	req.Header.Set("X-Agent-ID", agentID)
+	rec := httptest.NewRecorder()
+	testHandler.CreateKnowledgeNode(rec, req)
+	if rec.Code != 201 {
+		t.Fatalf("agent node create: status %d body %s", rec.Code, rec.Body.String())
+	}
+	var created struct {
+		Node KnowledgeNodeResponse `json:"node"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &created); err != nil {
+		t.Fatalf("decode node: %v", err)
+	}
+	if created.Node.Status != "proposed" {
+		t.Fatalf("agent-created node must be proposed, got %q", created.Node.Status)
+	}
+	if created.Node.CreatedByType != "agent" || created.Node.CreatedByID != agentID {
+		t.Fatalf("node must be attributed to the agent: %+v", created.Node)
+	}
+
+	// Agent-created edge lands as proposed too.
+	other := createKnowledgeNodeForTest(t, "concept", "Review Target Concept")
+	req = newRequest("POST", "/api/knowledge/edges", map[string]any{
+		"src_id": created.Node.ID, "dst_id": other.ID, "predicate": "related_to",
+	})
+	req.Header.Set("X-Actor-Source", "task_token")
+	req.Header.Set("X-Agent-ID", agentID)
+	rec = httptest.NewRecorder()
+	testHandler.CreateKnowledgeEdge(rec, req)
+	if rec.Code != 201 {
+		t.Fatalf("agent edge create: status %d body %s", rec.Code, rec.Body.String())
+	}
+	var edgeCreated struct {
+		Edge KnowledgeEdgeResponse `json:"edge"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &edgeCreated); err != nil {
+		t.Fatalf("decode edge: %v", err)
+	}
+	if edgeCreated.Edge.Status != "proposed" {
+		t.Fatalf("agent-created edge must be proposed, got %q", edgeCreated.Edge.Status)
+	}
+
+	// Review queue lists the proposed edge without an endpoint filter.
+	req = newRequest("GET", "/api/knowledge/edges?status=proposed", nil)
+	rec = httptest.NewRecorder()
+	testHandler.ListKnowledgeEdges(rec, req)
+	var queue struct {
+		Total int `json:"total"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &queue); err != nil || queue.Total != 1 {
+		t.Fatalf("review queue should list 1 proposed edge: %s", rec.Body.String())
+	}
+
+	// Agents cannot promote their own material.
+	req = withURLParam(newRequest("PUT", "/api/knowledge/edges/"+edgeCreated.Edge.ID+"/status", map[string]any{
+		"status": "confirmed",
+	}), "id", edgeCreated.Edge.ID)
+	req.Header.Set("X-Actor-Source", "task_token")
+	req.Header.Set("X-Agent-ID", agentID)
+	rec = httptest.NewRecorder()
+	testHandler.UpdateKnowledgeEdgeStatusHandler(rec, req)
+	if rec.Code != 403 {
+		t.Fatalf("agent status change should 403, got %d", rec.Code)
+	}
+
+	// A member approves through the same endpoint.
+	req = withURLParam(newRequest("PUT", "/api/knowledge/edges/"+edgeCreated.Edge.ID+"/status", map[string]any{
+		"status": "confirmed",
+	}), "id", edgeCreated.Edge.ID)
+	rec = httptest.NewRecorder()
+	testHandler.UpdateKnowledgeEdgeStatusHandler(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("member approve: status %d body %s", rec.Code, rec.Body.String())
+	}
+	var approved struct {
+		Edge KnowledgeEdgeResponse `json:"edge"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &approved); err != nil || approved.Edge.Status != "confirmed" {
+		t.Fatalf("edge should be confirmed after review: %s", rec.Body.String())
+	}
+}

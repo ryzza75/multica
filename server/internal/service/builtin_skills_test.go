@@ -517,6 +517,51 @@ func TestProjectsAndResourcesSkillCoversDurableContext(t *testing.T) {
 	}
 }
 
+func TestBuiltinKnowledgeSkill(t *testing.T) {
+	skill, ok := findSkill(t, "multica-knowledge")
+	if !ok {
+		return
+	}
+	fm, body, _ := splitFrontmatter(skill.Content)
+
+	if got := strings.TrimSpace(fm["user-invocable"]); got != "false" {
+		t.Errorf("user-invocable = %q, want false", got)
+	}
+	if got := strings.TrimSpace(fm["allowed-tools"]); !strings.Contains(got, "Bash(multica *)") {
+		t.Errorf("allowed-tools = %q, want access to the Multica CLI", got)
+	}
+
+	mustContain := []string{
+		// Search-first dedup contract.
+		"multica knowledge search",
+		"--confirm-new",
+		// Provenance requirement.
+		"--source-url",
+		// Trust gate: agents propose, members confirm.
+		"proposed",
+		// Affirmation, not duplication.
+		"affirmed",
+		// Multi-hop query surface.
+		"multica knowledge graph",
+		"multica knowledge path",
+		// Review queue.
+		"multica knowledge review list",
+		// Member-only actions agents must not attempt.
+		"member-only",
+		// Extraction autopilot recipe.
+		"multica autopilot create",
+		"references/knowledge-source-map.md",
+	}
+	for _, want := range mustContain {
+		if !strings.Contains(body, want) {
+			t.Errorf("knowledge skill missing %q", want)
+		}
+	}
+	if !skillHasFile(skill, "references/knowledge-source-map.md") {
+		t.Errorf("knowledge skill missing supporting file references/knowledge-source-map.md")
+	}
+}
+
 func findSkill(t *testing.T, name string) (AgentSkillData, bool) {
 	t.Helper()
 	for _, s := range loadBuiltinSkills() {

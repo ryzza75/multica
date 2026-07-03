@@ -447,14 +447,38 @@ func (h *Handler) GetKnowledgeEdge(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// ListKnowledgeEdges lists edges touching one endpoint (required filter —
-// unbounded workspace-wide edge dumps go through /graph instead).
+// ListKnowledgeEdges lists edges touching one endpoint, or — when no
+// endpoint filter is given — live edges in a specific status (the review
+// queue). Unbounded workspace-wide edge dumps go through /graph instead.
 func (h *Handler) ListKnowledgeEdges(w http.ResponseWriter, r *http.Request) {
 	wsUUID, ok := parseUUIDOrBadRequest(w, h.resolveWorkspaceID(r), "workspace id")
 	if !ok {
 		return
 	}
 	q := r.URL.Query()
+
+	if strings.TrimSpace(q.Get("endpoint_id")) == "" {
+		status := strings.TrimSpace(q.Get("status"))
+		if !knowledgeStatuses[status] {
+			writeError(w, http.StatusBadRequest, "endpoint_id or a valid status filter is required")
+			return
+		}
+		limit := clampKnowledgeInt(q.Get("limit"), 100, 1, 500)
+		edges, err := h.Queries.ListKnowledgeEdgesByStatus(r.Context(), db.ListKnowledgeEdgesByStatusParams{
+			WorkspaceID: wsUUID, Status: status, Limit: int32(limit),
+		})
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to list knowledge edges")
+			return
+		}
+		resp := make([]KnowledgeEdgeResponse, len(edges))
+		for i, e := range edges {
+			resp[i] = knowledgeEdgeToResponse(e)
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"edges": resp, "total": len(resp)})
+		return
+	}
+
 	epType, epID, err := h.resolveKnowledgeEndpoint(r.Context(), wsUUID, q.Get("endpoint_type"), q.Get("endpoint_id"))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "endpoint: "+err.Error())

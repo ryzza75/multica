@@ -219,3 +219,13 @@ LIMIT $3;
 DELETE FROM knowledge_edge
 WHERE workspace_id = $1
   AND ((src_type = $2 AND src_id = $3) OR (dst_type = $2 AND dst_id = $3));
+
+-- name: ListKnowledgeEdgesByStatus :many
+-- Review-queue listing: live edges in a given status across the workspace
+-- (proposed = awaiting human review).
+SELECT * FROM knowledge_edge
+WHERE workspace_id = $1
+  AND status = $2
+  AND valid_until IS NULL
+ORDER BY created_at DESC
+LIMIT $3;

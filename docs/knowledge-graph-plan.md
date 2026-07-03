@@ -418,9 +418,13 @@ runtime's working directory (`execenv/context.go`).
 - **Extraction autopilot**: an autopilot (existing `autopilot` machinery) that
   runs an agent over new/updated issues, comments, and completed task outputs,
   proposing nodes/edges with provenance. Batched (e.g. daily), not per-event.
-- **Runtime-memory ingestion** (per §3.1): a task-teardown hook (alongside the
-  existing `sidecar_manifest` cleanup) that captures runtime-written memory
-  artifacts from the working directory as `knowledge_source` rows
+- **Runtime-memory ingestion** (per §3.1) — *deferred to Phase 2b*: it is the
+  only Phase 2 item that touches daemon/execenv teardown paths, so it ships
+  separately once the skill-driven write-back path (which achieves the same
+  goal with zero daemon risk) has proven itself. A task-teardown hook
+  (alongside the existing `sidecar_manifest` cleanup) that captures
+  runtime-written memory artifacts from the working directory as
+  `knowledge_source` rows
   (`source_type='runtime_memory'`, ref carries agent/task/runtime), feeding
   the same extraction pipeline. Opt-in per agent, since it reads what the
   runtime chose to remember. For OpenClaw this means the workspace
