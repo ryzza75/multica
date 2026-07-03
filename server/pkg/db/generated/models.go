@@ -528,6 +528,79 @@ type IssueToLabel struct {
 	LabelID pgtype.UUID `json:"label_id"`
 }
 
+type KnowledgeEdge struct {
+	ID             pgtype.UUID        `json:"id"`
+	WorkspaceID    pgtype.UUID        `json:"workspace_id"`
+	SrcType        string             `json:"src_type"`
+	SrcID          pgtype.UUID        `json:"src_id"`
+	DstType        string             `json:"dst_type"`
+	DstID          pgtype.UUID        `json:"dst_id"`
+	Predicate      string             `json:"predicate"`
+	Confidence     float32            `json:"confidence"`
+	Attrs          []byte             `json:"attrs"`
+	Status         string             `json:"status"`
+	ValidFrom      pgtype.Timestamptz `json:"valid_from"`
+	ValidUntil     pgtype.Timestamptz `json:"valid_until"`
+	SupersededBy   pgtype.UUID        `json:"superseded_by"`
+	LastAffirmedAt pgtype.Timestamptz `json:"last_affirmed_at"`
+	CreatedByType  string             `json:"created_by_type"`
+	CreatedByID    pgtype.UUID        `json:"created_by_id"`
+	CreatedAt      pgtype.Timestamptz `json:"created_at"`
+}
+
+type KnowledgeEvidence struct {
+	ID            pgtype.UUID        `json:"id"`
+	WorkspaceID   pgtype.UUID        `json:"workspace_id"`
+	EdgeID        pgtype.UUID        `json:"edge_id"`
+	SourceID      pgtype.UUID        `json:"source_id"`
+	Stance        string             `json:"stance"`
+	Note          pgtype.Text        `json:"note"`
+	CreatedByType string             `json:"created_by_type"`
+	CreatedByID   pgtype.UUID        `json:"created_by_id"`
+	CreatedAt     pgtype.Timestamptz `json:"created_at"`
+}
+
+type KnowledgeNode struct {
+	ID            pgtype.UUID        `json:"id"`
+	WorkspaceID   pgtype.UUID        `json:"workspace_id"`
+	Kind          string             `json:"kind"`
+	Slug          string             `json:"slug"`
+	Title         string             `json:"title"`
+	Aliases       []byte             `json:"aliases"`
+	Summary       pgtype.Text        `json:"summary"`
+	Content       pgtype.Text        `json:"content"`
+	Attrs         []byte             `json:"attrs"`
+	Status        string             `json:"status"`
+	MergedInto    pgtype.UUID        `json:"merged_into"`
+	CreatedByType string             `json:"created_by_type"`
+	CreatedByID   pgtype.UUID        `json:"created_by_id"`
+	CreatedAt     pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt     pgtype.Timestamptz `json:"updated_at"`
+}
+
+type KnowledgeNodeRevision struct {
+	ID           pgtype.UUID        `json:"id"`
+	WorkspaceID  pgtype.UUID        `json:"workspace_id"`
+	NodeID       pgtype.UUID        `json:"node_id"`
+	Content      pgtype.Text        `json:"content"`
+	Summary      pgtype.Text        `json:"summary"`
+	EditedByType string             `json:"edited_by_type"`
+	EditedByID   pgtype.UUID        `json:"edited_by_id"`
+	CreatedAt    pgtype.Timestamptz `json:"created_at"`
+}
+
+type KnowledgeSource struct {
+	ID            pgtype.UUID        `json:"id"`
+	WorkspaceID   pgtype.UUID        `json:"workspace_id"`
+	SourceType    string             `json:"source_type"`
+	SourceRef     []byte             `json:"source_ref"`
+	Title         pgtype.Text        `json:"title"`
+	Content       pgtype.Text        `json:"content"`
+	CreatedByType string             `json:"created_by_type"`
+	CreatedByID   pgtype.UUID        `json:"created_by_id"`
+	CreatedAt     pgtype.Timestamptz `json:"created_at"`
+}
+
 type LarkBindingToken struct {
 	TokenHash      string             `json:"token_hash"`
 	WorkspaceID    pgtype.UUID        `json:"workspace_id"`
