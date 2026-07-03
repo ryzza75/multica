@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
   LaunchAgent: keep Paperclip running (default instance, authenticated/private,
-  loopback:3200) and restart it if it dies or after login.
+  loopback:3100) and restart it if it dies or after login.
 
   Install (replace /Users/jarvis if your home differs):
     cp docs/paperclip-mini/ing.paperclip.server.plist ~/Library/LaunchAgents/
@@ -11,7 +11,7 @@
     launchctl unload ~/Library/LaunchAgents/ing.paperclip.server.plist  # stop
 
   TEST BEFORE TRUSTING: after `launchctl load`, run
-    curl -s http://127.0.0.1:3200/api/health
+    curl -s http://127.0.0.1:3100/api/health
   and watch `tail -f ~/paperclip-dev.log` for ~1 min to confirm it is NOT
   restart-looping. If it loops, the wrapper's exec is backgrounding — tell
   Claude and we will switch the KeepAlive strategy.

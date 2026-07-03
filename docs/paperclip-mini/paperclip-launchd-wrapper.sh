@@ -23,7 +23,7 @@ pkill -f "tsx/dist/cli.mjs watch.*src/index.ts" 2>/dev/null || true
 pkill -f "dev-runner.ts"                        2>/dev/null || true
 pkill -f "dev-watch.ts"                         2>/dev/null || true
 pkill -f "@paperclipai/server dev:watch"        2>/dev/null || true
-for p in 3200 3201; do
+for p in 3100 3101; do
   lsof -tnP -iTCP:$p -sTCP:LISTEN 2>/dev/null | xargs -r kill 2>/dev/null || true
 done
 sleep 2
