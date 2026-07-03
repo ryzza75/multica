@@ -123,6 +123,29 @@ the user-visible, editable "memory page" — what runtime auto-memory keeps in
 hidden files (or per-agent workspace files that managed tasks can't see), the
 graph keeps as wiki pages with provenance and history.
 
+### 3.2 One intake pipeline for every memory write
+
+How Multica *manages* the memory requirement: every write converges on a
+single service-layer intake, regardless of origin — UI edits, `multica
+knowledge` CLI calls from agents, the extraction autopilot, runtime-memory
+ingestion at task teardown, one-time imports. Five stages:
+
+1. **Normalize** — map to kinds/predicates, canonicalize title/slug.
+2. **Resolve** — entity resolution against existing nodes (slug, alias,
+   external-id, vector similarity); attach to an existing node or create.
+3. **Reconcile** — fact-level merge (§4.6): a claim identical to a live edge
+   *affirms* it (new evidence row, `last_affirmed_at` bump) instead of
+   duplicating it; a conflicting claim on a single-valued predicate proposes
+   supersedence; anything genuinely new creates an edge.
+4. **Gate** — trust-based status: human assertions and designated curator
+   agents land `confirmed`; extraction and runtime-memory ingestion land
+   `proposed`.
+5. **Publish** — realtime events, embedding-job enqueue.
+
+No writer bypasses reconciliation. That is the property that lets the graph
+grow continually without accumulating duplicates, and lets new information
+*update* old facts instead of piling up beside them.
+
 ## 4. Ontology and standards
 
 This is what makes the graph "organised, standardised, complete" instead of
@@ -168,9 +191,11 @@ edge vocabulary queryable. Free-text nuance goes in `edge.attrs.note`.
 
 ### 4.4 Provenance and confidence
 
-- Every edge carries `source_id` (FK → `knowledge_source`, nullable only for
-  human-asserted edges, which instead carry the asserting actor) and a
-  `confidence` float (0–1).
+- An edge is a *claim*; its proof lives in `knowledge_evidence` rows — one
+  per (source, stance), where stance is `supports` or `contradicts`. The
+  edge's `confidence` float is a cached value recomputed from its evidence
+  set (recency-weighted; contradictions subtract). Human-asserted edges get
+  a synthetic `manual` source so even they answer "says who?".
 - Every node/edge records `created_by_type`/`created_by_id`
   (`member`/`agent`) — same polymorphic actor pattern as `issue.creator_type`.
 
@@ -180,6 +205,31 @@ Agent-extracted material lands as `status='proposed'`; humans (or a trusted
 curator agent) promote to `confirmed` or reject. The graph view filters to
 `confirmed` by default with a toggle to show proposed material. This is the
 quality gate that keeps automated extraction from polluting the graph.
+
+### 4.6 Fact lifecycle: growth, affirmation, staleness, supersedence
+
+The graph must grow **and stay current**. Four mechanisms:
+
+- **Evidence accumulates; edges don't duplicate.** Re-encountering a known
+  fact strengthens it — a new `knowledge_evidence` row and a
+  `last_affirmed_at` bump — rather than creating a twin edge (§3.2 stage 3).
+- **Temporal validity, not deletion.** Edges carry `valid_from`/`valid_until`.
+  A fact that stops being true (a person changes jobs, a market claim
+  expires) is *closed* — `valid_until` set, `superseded_by` pointing at its
+  replacement — never deleted. The graph can be rendered "as of" any date,
+  and the history is itself knowledge.
+- **Single-valued predicates auto-reconcile.** Predicates are declared
+  functional or multi-valued in code (`works_at` is functional; `authored`
+  is multi-valued). A new confirmed claim on a functional predicate with a
+  different object proposes closing the old edge — via the review queue for
+  agent-derived claims, immediately for human assertions.
+- **Volatility classes drive re-verification.** Each predicate declares a
+  volatility: immutable (`authored`, `occurred_at`), slow (`founded`,
+  `part_of`), or volatile (`works_at`, market/trend claims). A fact is
+  *stale* when `last_affirmed_at` exceeds its class threshold. The Phase 5
+  re-verification autopilot walks stale facts and has an agent re-check each
+  against fresh sources, filing affirming or superseding evidence — this is
+  what makes the knowledge base update itself instead of only accreting.
 
 ## 5. Schema (migration `128_knowledge_graph`)
 
@@ -227,15 +277,47 @@ CREATE TABLE knowledge_edge (
     dst_type        TEXT NOT NULL CHECK (dst_type IN ('node','issue','project','agent','member')),
     dst_id          UUID NOT NULL,
     predicate       TEXT NOT NULL,          -- validated enum, see 4.2
-    confidence      REAL NOT NULL DEFAULT 1.0,
+    confidence      REAL NOT NULL DEFAULT 1.0,  -- cached; recomputed from evidence
     attrs           JSONB NOT NULL DEFAULT '{}',
     status          TEXT NOT NULL DEFAULT 'confirmed'
                     CHECK (status IN ('proposed','confirmed','rejected')),
-    source_id       UUID REFERENCES knowledge_source(id) ON DELETE SET NULL,
+    valid_from      TIMESTAMPTZ,            -- null = unknown start
+    valid_until     TIMESTAMPTZ,            -- null = still valid (live edge)
+    superseded_by   UUID REFERENCES knowledge_edge(id) ON DELETE SET NULL,
+    last_affirmed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    created_by_type TEXT NOT NULL,
+    created_by_id   UUID NOT NULL,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+-- Uniqueness applies to LIVE edges only, so a closed fact can recur later
+-- (someone rejoins a company) without violating the constraint:
+CREATE UNIQUE INDEX uq_knowledge_edge_live
+    ON knowledge_edge (workspace_id, src_type, src_id, dst_type, dst_id, predicate)
+    WHERE valid_until IS NULL;
+
+CREATE TABLE knowledge_evidence (            -- per-source proof for an edge
+    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    workspace_id    UUID NOT NULL REFERENCES workspace(id) ON DELETE CASCADE,
+    edge_id         UUID NOT NULL REFERENCES knowledge_edge(id) ON DELETE CASCADE,
+    source_id       UUID NOT NULL REFERENCES knowledge_source(id) ON DELETE CASCADE,
+    stance          TEXT NOT NULL DEFAULT 'supports'
+                    CHECK (stance IN ('supports','contradicts')),
+    note            TEXT,
     created_by_type TEXT NOT NULL,
     created_by_id   UUID NOT NULL,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
-    UNIQUE (workspace_id, src_type, src_id, dst_type, dst_id, predicate)
+    UNIQUE (edge_id, source_id, stance)
+);
+
+CREATE TABLE knowledge_node_revision (       -- wiki-page edit history
+    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    workspace_id    UUID NOT NULL REFERENCES workspace(id) ON DELETE CASCADE,
+    node_id         UUID NOT NULL REFERENCES knowledge_node(id) ON DELETE CASCADE,
+    content         TEXT,
+    summary         TEXT,
+    edited_by_type  TEXT NOT NULL,
+    edited_by_id    UUID NOT NULL,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 CREATE TABLE knowledge_chunk (               -- RAG unit for long sources
@@ -281,11 +363,13 @@ GET    /api/knowledge/nodes/{id}            get (accepts slug or UUID via loader
 PUT    /api/knowledge/nodes/{id}            update
 DELETE /api/knowledge/nodes/{id}
 POST   /api/knowledge/nodes/{id}/merge      merge into another node
-GET    /api/knowledge/edges                 list (src/dst/predicate filters)
-POST   /api/knowledge/edges                 create
+GET    /api/knowledge/edges                 list (src/dst/predicate/live filters)
+POST   /api/knowledge/edges                 create (reconciled: may affirm instead)
+POST   /api/knowledge/edges/{id}/evidence   attach supporting/contradicting evidence
+POST   /api/knowledge/edges/{id}/close      set valid_until (+ optional superseded_by)
 DELETE /api/knowledge/edges/{id}
 POST   /api/knowledge/sources               capture a source (url/text/ref)
-GET    /api/knowledge/graph                 neighborhood: ?focus=&hops=&kinds=&predicates=&min_confidence=&status=&limit=
+GET    /api/knowledge/graph                 neighborhood: ?focus=&hops=&kinds=&predicates=&min_confidence=&status=&as_of=&limit=
 GET    /api/knowledge/path                  ?src=&dst=&max_hops=   (bidirectional BFS)
 GET    /api/knowledge/search                hybrid search (Phase 3 adds vector arm)
 ```
@@ -384,15 +468,39 @@ wiring per app, `useNavigation`, `wsId`-keyed queries).
   (`knowledgeKeys` factory including `wsId`), mutations optimistic-by-default.
   Client-side `kind`/`predicate` handling always has a `default` branch.
 - `packages/views/knowledge/`:
-  - `knowledge-graph-page.tsx` — sigma canvas; focus node + N-hop expansion
-    (click to expand a node's neighborhood incrementally rather than loading
-    the world); filter rail (kind, predicate, confidence, status, time);
-    color by kind, size by degree; community coloring toggle.
-  - `node-panel.tsx` — side panel: markdown `content` (the wiki page),
-    provenance list, connected issues/projects, edit affordances.
+  - `knowledge-graph-page.tsx` — the sigma canvas. UX spec:
+    - **Entry is search-first**: a prominent search box (hybrid search)
+      focuses the graph on a chosen node; issues/projects get a
+      "view in graph" affordance that deep-links here with them as focus.
+    - **Incremental exploration**: single-click selects (side panel),
+      click on the expand badge fetches that node's next hop; double-click
+      re-focuses and re-centers. Never load the whole graph — the world
+      grows outward from where you're looking.
+    - **Visual encoding**: color by kind (small token-derived palette),
+      node size by degree, edge thickness by confidence, dashed edges for
+      `proposed`, muted/ghosted for closed (`valid_until` set; hidden by
+      default). Hover shows a card: title, kind, summary, last-affirmed.
+    - **Freshness overlay**: a toggle that halos stale volatile facts
+      (§4.6) so "what needs re-verification" is visible at a glance.
+    - **Time travel**: a timeline scrubber wired to `as_of` — watch the
+      graph as it existed at any date; superseded facts reappear in their
+      valid window. This is the payoff of temporal edges.
+    - **Filter rail**: kind, predicate, min-confidence, status, date range;
+      community-coloring toggle (graphology louvain).
+    - **Saved views**: named filter+focus combos persisted in the Zustand
+      store (client state; filters persist, graph data never does).
+    - **Performance**: ForceAtlas2 layout in a web worker
+      (`graphology-layout-forceatlas2`), sigma WebGL rendering, server-side
+      caps + incremental expansion keep any single response bounded.
+  - `node-panel.tsx` — side panel: markdown `content` (the wiki page, with
+    revision history from `knowledge_node_revision`), per-edge evidence
+    list (supports/contradicts with sources), connected issues/projects,
+    edit affordances. Editing here is the human half of the memory loop.
   - `path-finder.tsx` — pick two nodes → render the connecting path(s);
     this is the multi-hop "how are these related?" feature.
-  - `knowledge-review.tsx` — proposed-items curation queue.
+  - `knowledge-review.tsx` — curation queue: proposed nodes/edges,
+    contradiction flags, and pending supersedence proposals, with
+    accept/reject/merge actions.
 - App wiring: `apps/web/app/[slug]/knowledge/page.tsx` + desktop session
   route (tab destination, not overlay). Semantic tokens only for chrome;
   graph-specific colors defined as a small token-derived palette.
@@ -403,6 +511,11 @@ wiring per app, `useNavigation`, `wsId`-keyed queries).
 
 The "tell me something I didn't know" layer, built on Phases 1–4:
 
+- **Staleness re-verification autopilot** (§4.6): walks volatile/slow facts
+  past their affirmation threshold, has an agent re-check each against fresh
+  sources (web search + existing evidence), and files affirming or
+  superseding evidence through the intake pipeline. Closes the loop that
+  makes the knowledge base self-updating, not just self-growing.
 - **Weekly insight digest** (autopilot → inbox): new nodes/edges, newly
   formed communities, bridge nodes (high betweenness = concepts connecting
   otherwise-separate clusters), shortest new paths between previously
