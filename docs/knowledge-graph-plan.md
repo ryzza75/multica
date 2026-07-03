@@ -33,6 +33,7 @@ creates the latter:
 | pgvector availability | **Provisioned everywhere but unused**: CI (`.github/workflows/ci.yml`), `docker-compose.yml`, `docker-compose.selfhost.yml` all run `pgvector/pgvector:pg17`. Enabling the extension is a migration away. |
 | Graph edges | Bespoke per-pair tables only. `issue_dependency` (`blocks`/`blocked_by`/`related`) is the closest existing typed edge. No generic edge table, no resource↔resource or resource↔issue links. |
 | Graph visualization | **No dependency exists** (no d3/cytoscape/sigma/react-flow anywhere). |
+| Runtime-native agent memory | **Exists, but at the runtime level and outside Multica's control.** Codex ships a native auto-memory subsystem (wiki/LLM-style: `$CODEX_HOME/memories/raw_memories.md` + sqlite state); the daemon deliberately disables it in managed tasks (`execenv/codex_memory.go`) because it is opaque, uneditable from any Multica UI, and leaked host-project memories across workspaces (multica#3130). Escape hatch: `MULTICA_CODEX_MEMORY=1`. Hermes likewise maintains its own memory/context outside daemon control — it self-loads AGENTS.md / `.agent_context` from cwd (the daemon skips `SystemPrompt` for it, `agent/hermes.go`), and no `hermes_memory.go` equivalent exists to scope or disable its native memory. `codex_memory.go`'s header names the intended end state: "a Multica-owned, user-visible, project- or issue-scoped memory store." |
 | Agent context injection | Exists and is the key integration seam: `server/internal/daemon/execenv/context.go` writes `.agent_context/issue_context.md`, provider-native skills, and `.multica/project/resources.json` into every task's working directory. |
 | Agent write path | Exists: the `multica` CLI + builtin skills (`server/internal/service/builtin_skills/*`) teach every runtime, including Hermes (ACP backend, `server/pkg/agent/hermes.go`), how to mutate durable workspace state. |
 
@@ -64,6 +65,42 @@ filtered by it, `X-Workspace-ID` selects it), consistent with the domain rule.
 Graph queries (N-hop neighborhoods, paths) run server-side as recursive CTEs
 with hop and fan-out limits. Postgres is sufficient for the target scale
 (tens of thousands of nodes per workspace); no separate graph database.
+
+### 3.1 The graph IS the memory store (relationship to Hermes/Codex native memory)
+
+Runtime-native memory already exists — Hermes keeps its own memory/context,
+Codex ships wiki/LLM-style auto-memory — and the daemon's stance on it is
+already on record in `codex_memory.go`: native memory is disabled in managed
+tasks because it is opaque, unauditable, and leaks across workspaces, and the
+long-term answer is a Multica-owned, user-visible, scoped memory store.
+
+**This knowledge graph is that store.** Three consequences:
+
+1. **Native memory is an ingestion source, never a peer store.** Runtime
+   memories (Hermes memory, Codex `raw_memories.md` where a user has opted it
+   back on) enter the graph as `knowledge_source` rows with
+   `source_type='runtime_memory'` and flow through the same extraction →
+   `proposed` → curation pipeline as everything else. They are treated as
+   *claims by an agent*, with provenance, not as truth.
+2. **Write-back replaces private memory.** The `multica-knowledge` builtin
+   skill (Phase 2) teaches agents to persist durable learnings to the graph
+   via the CLI instead of relying on their runtime's private memory. That is
+   what makes memory survive runtime switches: something learned during a
+   Hermes task is available to a Claude or Kimi task, and vice versa — none
+   of the runtime-native stores can do that.
+3. **One memory, not two.** Once graph write-back and knowledge-context
+   injection (Phase 3) exist, runtime-native auto-memory should stay disabled
+   in managed tasks (as Codex's already is), so there is never a second,
+   invisible memory diverging from the curated one. Hermes needs an explicit
+   decision here (see §8): today its native memory is neither scoped nor
+   disabled by the daemon — if it persists memory across sessions the way
+   Codex does, it needs a `hermes_memory.go` analog (disable in managed
+   tasks, env-var escape hatch) for the same cross-task/cross-workspace
+   leak reasons.
+
+The wiki angle follows from the same decision: a node's markdown `content` is
+the user-visible, editable "memory page" — what runtime auto-memory keeps in
+hidden files, the graph keeps as wiki pages with provenance and history.
 
 ## 4. Ontology and standards
 
@@ -276,6 +313,12 @@ runtime's working directory (`execenv/context.go`).
 - **Extraction autopilot**: an autopilot (existing `autopilot` machinery) that
   runs an agent over new/updated issues, comments, and completed task outputs,
   proposing nodes/edges with provenance. Batched (e.g. daily), not per-event.
+- **Runtime-memory ingestion** (per §3.1): a task-teardown hook (alongside the
+  existing `sidecar_manifest` cleanup) that captures runtime-written memory
+  artifacts from the working directory as `knowledge_source` rows
+  (`source_type='runtime_memory'`, ref carries agent/task/runtime), feeding
+  the same extraction pipeline. Opt-in per agent, since it reads what the
+  runtime chose to remember.
 - **Curation queue**: `status='proposed'` items surface in a review list
   (Phase 4 UI) with accept/reject/merge actions; a scheduled "gardener" agent
   can also merge obvious duplicates and fill missing summaries, using the same
@@ -371,5 +414,11 @@ The "tell me something I didn't know" layer, built on Phases 1–4:
 3. **Auto-linking issues↔nodes** on mention detection (like PR linking scans
    in `multica-working-on-issues`): nice, but deferred until the vocabulary
    stabilizes.
-4. **Mobile**: read-only graph later, if ever — mobile is independent by
+4. **Hermes native memory policy**: audit what the Hermes runtime actually
+   persists across sessions. If it keeps durable memory the way Codex does,
+   add a `hermes_memory.go` analog (disable in managed tasks + env-var escape
+   hatch, mirroring `MULTICA_CODEX_MEMORY`); if its memory is session-scoped
+   only, document that and leave it alone. Either way the graph write-back
+   path from §3.1 is the sanctioned durable memory.
+5. **Mobile**: read-only graph later, if ever — mobile is independent by
    design and out of scope here.
