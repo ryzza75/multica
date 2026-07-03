@@ -4,8 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+
+	"github.com/multica-ai/multica/server/internal/knowledge"
 )
 
 func cleanupKnowledgeRows(t *testing.T) {
@@ -454,5 +458,133 @@ func TestKnowledgeAgentTrustGateAndReview(t *testing.T) {
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &approved); err != nil || approved.Edge.Status != "confirmed" {
 		t.Fatalf("edge should be confirmed after review: %s", rec.Body.String())
+	}
+}
+
+// fakeEmbeddingServer mimics an OpenAI-compatible /embeddings endpoint with
+// keyword-driven vectors: inputs mentioning "zebra" land on one axis,
+// everything else on another, making cosine proximity controllable.
+func fakeEmbeddingServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Input []string `json:"input"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), 400)
+			return
+		}
+		type datum struct {
+			Index     int       `json:"index"`
+			Embedding []float32 `json:"embedding"`
+		}
+		data := make([]datum, len(req.Input))
+		for i, input := range req.Input {
+			vec := make([]float32, knowledge.EmbeddingDim)
+			if strings.Contains(strings.ToLower(input), "zebra") {
+				vec[0] = 1
+			} else {
+				vec[1] = 1
+			}
+			data[i] = datum{Index: i, Embedding: vec}
+		}
+		json.NewEncoder(w).Encode(map[string]any{"data": data})
+	}))
+}
+
+func TestKnowledgeHybridSemanticSearch(t *testing.T) {
+	if testHandler == nil {
+		t.Skip("database not available")
+	}
+	cleanupKnowledgeRows(t)
+
+	srv := fakeEmbeddingServer(t)
+	t.Cleanup(srv.Close)
+	svc := knowledge.New(knowledge.Config{BaseURL: srv.URL, Model: "fake-embed-1536"}, testPool)
+	if !svc.VectorAvailable(context.Background()) {
+		t.Skip("pgvector / knowledge_embedding not available")
+	}
+	prev := testHandler.Knowledge
+	testHandler.Knowledge = svc
+	t.Cleanup(func() { testHandler.Knowledge = prev })
+	t.Cleanup(func() {
+		testPool.Exec(context.Background(), `DELETE FROM knowledge_embedding WHERE workspace_id = $1`, testWorkspaceID)
+	})
+
+	// The node's title shares no tokens with the query — only the wiki
+	// body does, so a lexical hit is impossible and any match proves the
+	// semantic arm.
+	req := newRequest("POST", "/api/knowledge/nodes", map[string]any{
+		"kind": "concept", "title": "Striped Savanna Animal",
+		"content": "Notes about zebra migration and herd behavior.", "confirm_new": true,
+	})
+	rec := httptest.NewRecorder()
+	testHandler.CreateKnowledgeNode(rec, req)
+	if rec.Code != 201 {
+		t.Fatalf("create node: %d %s", rec.Code, rec.Body.String())
+	}
+	var created struct {
+		Node KnowledgeNodeResponse `json:"node"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &created); err != nil {
+		t.Fatalf("decode node: %v", err)
+	}
+
+	// Backfill embeds the new node; a second pass finds nothing stale.
+	n, err := svc.EmbedStaleNodes(context.Background(), 50)
+	if err != nil || n < 1 {
+		t.Fatalf("EmbedStaleNodes = (%d, %v), want >=1 embedded", n, err)
+	}
+	if n2, err := svc.EmbedStaleNodes(context.Background(), 50); err != nil || n2 != 0 {
+		t.Fatalf("second backfill should be a no-op, got (%d, %v)", n2, err)
+	}
+
+	// Lexical arm alone cannot match "zebra herds" against the title.
+	req = newRequest("GET", "/api/knowledge/search?q=zebra+herds", nil)
+	rec = httptest.NewRecorder()
+	testHandler.SearchKnowledgeNodes(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("search: %d %s", rec.Code, rec.Body.String())
+	}
+	var result struct {
+		Nodes    []KnowledgeNodeResponse `json:"nodes"`
+		Semantic bool                    `json:"semantic"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &result); err != nil {
+		t.Fatalf("decode search: %v", err)
+	}
+	if !result.Semantic {
+		t.Fatalf("semantic arm should have run: %s", rec.Body.String())
+	}
+	found := false
+	for _, n := range result.Nodes {
+		if n.ID == created.Node.ID {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("semantic search should surface the zebra node: %s", rec.Body.String())
+	}
+
+	// A provider outage must degrade to lexical-only, never break search.
+	srv.Close()
+	req = newRequest("GET", "/api/knowledge/search?q=Savanna", nil)
+	rec = httptest.NewRecorder()
+	testHandler.SearchKnowledgeNodes(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("search with dead provider should still 200, got %d", rec.Code)
+	}
+	var fallback struct {
+		Nodes    []KnowledgeNodeResponse `json:"nodes"`
+		Semantic bool                    `json:"semantic"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &fallback); err != nil {
+		t.Fatalf("decode fallback search: %v", err)
+	}
+	if fallback.Semantic {
+		t.Fatal("dead provider must not report semantic=true")
+	}
+	if len(fallback.Nodes) != 1 {
+		t.Fatalf("lexical arm should still match the title: %s", rec.Body.String())
 	}
 }

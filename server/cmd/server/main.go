@@ -17,6 +17,7 @@ import (
 	"github.com/multica-ai/multica/server/internal/daemonws"
 	"github.com/multica-ai/multica/server/internal/events"
 	"github.com/multica-ai/multica/server/internal/handler"
+	"github.com/multica-ai/multica/server/internal/knowledge"
 	"github.com/multica-ai/multica/server/internal/logger"
 	obsmetrics "github.com/multica-ai/multica/server/internal/metrics"
 	"github.com/multica-ai/multica/server/internal/realtime"
@@ -411,6 +412,12 @@ func main() {
 	// — there is no separate goroutine for scheduled Autopilot anymore.
 	if err := schedulerMgr.Register(scheduler.AutopilotScheduleDispatchJob(pool, queries, autopilotSvc)); err != nil {
 		slog.Warn("scheduler: failed to register autopilot_schedule_dispatch job", "error", err)
+	}
+	// Knowledge-graph embedding refresh. A no-op (immediate success, zero
+	// rows) unless an embedding provider is configured via
+	// MULTICA_EMBEDDING_* and the database has pgvector (migration 129).
+	if err := schedulerMgr.Register(knowledge.EmbedBackfillJob(knowledge.NewFromEnv(pool))); err != nil {
+		slog.Warn("scheduler: failed to register knowledge_embedding_backfill job", "error", err)
 	}
 	go func() {
 		_ = schedulerMgr.Run(sweepCtx)

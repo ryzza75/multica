@@ -17,6 +17,20 @@ multica knowledge node get <slug-or-id> --output json
 multica knowledge graph <slug-or-id> --hops 2 --output json
 ```
 
+Search is hybrid when the workspace has an embedding provider configured:
+lexical (slug/title/alias) plus semantic similarity, fused. The response's
+`"semantic"` field reports whether the semantic arm ran. Phrase queries by
+meaning, not just exact tokens.
+
+## Retrieve before you research
+
+At the start of a task that involves research, people, organizations, or
+prior decisions, query the graph before reaching for the web: run
+`multica knowledge search` on the task's key terms and `multica knowledge
+graph` on the best hit. Knowledge already captured — by you, another agent,
+or the user — is more trustworthy than a fresh search and often already
+answers the question.
+
 ## Core model
 
 - A **node** is an entity: `person`, `organization`, `brand`, `concept`, `idea`, `claim`, `event`, `work`, `technology`, `market`, `place`, or `note`. Its markdown `content` is the entity's wiki page; `summary` is the one-line tooltip.

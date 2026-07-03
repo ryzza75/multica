@@ -13,6 +13,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/multica-ai/multica/server/internal/knowledge"
 	"github.com/multica-ai/multica/server/internal/util"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 	"github.com/multica-ai/multica/server/pkg/protocol"
@@ -491,8 +492,12 @@ func (h *Handler) ListKnowledgeNodesHandler(w http.ResponseWriter, r *http.Reque
 	writeJSON(w, http.StatusOK, map[string]any{"nodes": resp, "total": len(resp)})
 }
 
-// SearchKnowledgeNodes is the lexical search arm (slug / title / alias).
-// The semantic arm joins in the RAG phase.
+// SearchKnowledgeNodes is hybrid search: the lexical arm (slug / title /
+// alias) always runs; when an embedding provider and pgvector are
+// available, a semantic arm runs too and the rankings are fused with
+// reciprocal-rank fusion. Semantic failures (provider down, no
+// embeddings yet) silently degrade to lexical-only — search must never
+// break because RAG is misconfigured.
 func (h *Handler) SearchKnowledgeNodes(w http.ResponseWriter, r *http.Request) {
 	wsUUID, ok := parseUUIDOrBadRequest(w, h.resolveWorkspaceID(r), "workspace id")
 	if !ok {
@@ -504,18 +509,66 @@ func (h *Handler) SearchKnowledgeNodes(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	limit := clampKnowledgeInt(r.URL.Query().Get("limit"), 20, 1, 100)
-	nodes, err := h.Queries.SearchKnowledgeNodeCandidates(r.Context(), db.SearchKnowledgeNodeCandidatesParams{
+	lexical, err := h.Queries.SearchKnowledgeNodeCandidates(r.Context(), db.SearchKnowledgeNodeCandidatesParams{
 		WorkspaceID: wsUUID, Query: query, Limit: int32(limit),
 	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to search knowledge nodes")
 		return
 	}
-	resp := make([]KnowledgeNodeResponse, len(nodes))
-	for i, n := range nodes {
-		resp[i] = knowledgeNodeToResponse(n)
+
+	byID := make(map[string]db.KnowledgeNode, len(lexical))
+	lexicalIDs := make([]string, len(lexical))
+	for i, n := range lexical {
+		id := uuidToString(n.ID)
+		lexicalIDs[i] = id
+		byID[id] = n
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"nodes": resp, "total": len(resp)})
+
+	semanticUsed := false
+	fusedIDs := lexicalIDs
+	if h.Knowledge != nil && h.Knowledge.Enabled() {
+		semanticIDs, serr := h.Knowledge.SemanticSearch(r.Context(), uuidToString(wsUUID), query, limit)
+		if serr == nil && len(semanticIDs) > 0 {
+			// Hydrate semantic-only hits, dropping merged/rejected nodes the
+			// embedding table may still reference between backfill ticks.
+			var missing []pgtype.UUID
+			for _, id := range semanticIDs {
+				if _, seen := byID[id]; !seen {
+					if u, perr := util.ParseUUID(id); perr == nil {
+						missing = append(missing, u)
+					}
+				}
+			}
+			if len(missing) > 0 {
+				rows, rerr := h.Queries.ListKnowledgeNodesByIDs(r.Context(), db.ListKnowledgeNodesByIDsParams{
+					WorkspaceID: wsUUID, Ids: missing,
+				})
+				if rerr == nil {
+					for _, n := range rows {
+						if !n.MergedInto.Valid && n.Status != "rejected" {
+							byID[uuidToString(n.ID)] = n
+						}
+					}
+				}
+			}
+			semanticUsed = true
+			fusedIDs = knowledge.RRFMerge(lexicalIDs, semanticIDs)
+		}
+	}
+
+	resp := make([]KnowledgeNodeResponse, 0, limit)
+	for _, id := range fusedIDs {
+		n, okNode := byID[id]
+		if !okNode {
+			continue
+		}
+		resp = append(resp, knowledgeNodeToResponse(n))
+		if len(resp) >= limit {
+			break
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"nodes": resp, "total": len(resp), "semantic": semanticUsed})
 }
 
 // UpdateKnowledgeNodeRequest is the body for PUT /api/knowledge/nodes/{id}.

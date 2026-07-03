@@ -42,6 +42,23 @@ rule).
   `server/pkg/protocol/events.go`.
 - Queries: `server/pkg/db/queries/knowledge.sql` (sqlc).
 
+## Semantic search (RAG)
+
+- Embedding client, vector store, RRF fusion, staleness scan:
+  `server/internal/knowledge/semantic.go`. Provider config comes from
+  `MULTICA_EMBEDDING_API_BASE` / `MULTICA_EMBEDDING_API_KEY` /
+  `MULTICA_EMBEDDING_MODEL` (OpenAI-compatible `/embeddings`; model must
+  emit 1536-dim vectors).
+- Backfill scheduler job (`knowledge_embedding_backfill`, 5m cadence):
+  `server/internal/knowledge/job.go`, registered in
+  `server/cmd/server/main.go`.
+- Vector schema (guarded — skipped without pgvector):
+  `server/migrations/129_knowledge_embeddings.up.sql`
+  (`knowledge_embedding`, HNSW cosine index).
+- Hybrid search handler (lexical + semantic, RRF-fused, `"semantic"`
+  response flag, silent lexical fallback on provider failure):
+  `SearchKnowledgeNodes` in `server/internal/handler/knowledge.go`.
+
 ## CLI
 
 - `server/cmd/multica/cmd_knowledge.go` — `multica knowledge search`,
