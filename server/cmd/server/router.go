@@ -920,6 +920,37 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 				})
 			})
 
+			// Knowledge graph
+			r.Route("/api/knowledge", func(r chi.Router) {
+				r.Get("/search", h.SearchKnowledgeNodes)
+				r.Get("/graph", h.GetKnowledgeGraph)
+				r.Get("/path", h.GetKnowledgePath)
+				r.Route("/nodes", func(r chi.Router) {
+					r.Get("/", h.ListKnowledgeNodesHandler)
+					r.Post("/", h.CreateKnowledgeNode)
+					r.Route("/{id}", func(r chi.Router) {
+						r.Get("/", h.GetKnowledgeNode)
+						r.Put("/", h.UpdateKnowledgeNode)
+						r.Delete("/", h.DeleteKnowledgeNode)
+						r.Post("/merge", h.MergeKnowledgeNode)
+						r.Get("/revisions", h.ListKnowledgeNodeRevisionsHandler)
+					})
+				})
+				r.Route("/edges", func(r chi.Router) {
+					r.Get("/", h.ListKnowledgeEdges)
+					r.Post("/", h.CreateKnowledgeEdge)
+					r.Route("/{id}", func(r chi.Router) {
+						r.Get("/", h.GetKnowledgeEdge)
+						r.Delete("/", h.DeleteKnowledgeEdgeHandler)
+						r.Post("/evidence", h.AddKnowledgeEvidence)
+						r.Post("/close", h.CloseKnowledgeEdgeHandler)
+						r.Put("/status", h.UpdateKnowledgeEdgeStatusHandler)
+					})
+				})
+				r.Post("/sources", h.CreateKnowledgeSource)
+				r.Get("/sources/{id}", h.GetKnowledgeSource)
+			})
+
 			// Squads
 			r.Route("/api/squads", func(r chi.Router) {
 				r.Get("/", h.ListSquads)

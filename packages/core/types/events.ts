@@ -79,7 +79,13 @@ export type WSEventType =
   | "github_installation:deleted"
   | "pull_request:linked"
   | "pull_request:updated"
-  | "pull_request:unlinked";
+  | "pull_request:unlinked"
+  | "knowledge_node:created"
+  | "knowledge_node:updated"
+  | "knowledge_node:deleted"
+  | "knowledge_edge:created"
+  | "knowledge_edge:updated"
+  | "knowledge_edge:deleted";
 
 export interface WSMessage<T = unknown> {
   type: WSEventType;
@@ -475,6 +481,12 @@ export interface WSEventPayloadMap {
   "pull_request:linked": unknown;
   "pull_request:updated": unknown;
   "pull_request:unlinked": unknown;
+  "knowledge_node:created": unknown;
+  "knowledge_node:updated": unknown;
+  "knowledge_node:deleted": unknown;
+  "knowledge_edge:created": unknown;
+  "knowledge_edge:updated": unknown;
+  "knowledge_edge:deleted": unknown;
 }
 
 /**

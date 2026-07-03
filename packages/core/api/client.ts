@@ -128,6 +128,20 @@ import type {
   CreateBillingCheckoutSessionResponse,
   BillingCheckoutSessionStatus,
   CreateBillingPortalSessionResponse,
+  KnowledgeEdge,
+  SearchKnowledgeNodesResponse,
+  ListKnowledgeNodesResponse,
+  GetKnowledgeNodeResponse,
+  ListKnowledgeEdgesResponse,
+  GetKnowledgeEdgeResponse,
+  KnowledgeGraphResponse,
+  KnowledgePathResponse,
+  UpdateKnowledgeNodeRequest,
+  SearchKnowledgeParams,
+  ListKnowledgeNodesParams,
+  ListKnowledgeEdgesParams,
+  KnowledgeGraphParams,
+  KnowledgePathParams,
 } from "../types";
 import type { OnboardingCompletionPath } from "../onboarding/types";
 import type {
@@ -212,6 +226,22 @@ import {
   EMPTY_CANCEL_TASK_RESPONSE,
   InboxUnreadSummarySchema,
   EMPTY_INBOX_UNREAD_SUMMARY,
+  SearchKnowledgeNodesResponseSchema,
+  ListKnowledgeNodesResponseSchema,
+  GetKnowledgeNodeResponseSchema,
+  ListKnowledgeEdgesResponseSchema,
+  GetKnowledgeEdgeResponseSchema,
+  KnowledgeEdgeEnvelopeSchema,
+  KnowledgeGraphResponseSchema,
+  KnowledgePathResponseSchema,
+  EMPTY_SEARCH_KNOWLEDGE_NODES_RESPONSE,
+  EMPTY_LIST_KNOWLEDGE_NODES_RESPONSE,
+  EMPTY_GET_KNOWLEDGE_NODE_RESPONSE,
+  EMPTY_LIST_KNOWLEDGE_EDGES_RESPONSE,
+  EMPTY_GET_KNOWLEDGE_EDGE_RESPONSE,
+  EMPTY_KNOWLEDGE_EDGE,
+  EMPTY_KNOWLEDGE_GRAPH_RESPONSE,
+  EMPTY_KNOWLEDGE_PATH_RESPONSE,
 } from "./schemas";
 
 /** Identifies the calling client to the server.
@@ -1946,6 +1976,109 @@ export class ApiClient {
   ): Promise<void> {
     await this.fetch(`/api/projects/${projectId}/resources/${resourceId}`, {
       method: "DELETE",
+    });
+  }
+
+  // Knowledge graph. Every read is UI-facing, so all responses pass
+  // through a lenient schema (see CLAUDE.md "API Compatibility").
+  async searchKnowledge(params: SearchKnowledgeParams): Promise<SearchKnowledgeNodesResponse> {
+    const search = new URLSearchParams({ q: params.q });
+    if (params.limit !== undefined) search.set("limit", String(params.limit));
+    const raw = await this.fetch<unknown>(
+      `/api/knowledge/search?${search}`,
+      params.signal ? { signal: params.signal } : undefined,
+    );
+    return parseWithFallback(raw, SearchKnowledgeNodesResponseSchema, EMPTY_SEARCH_KNOWLEDGE_NODES_RESPONSE, {
+      endpoint: "GET /api/knowledge/search",
+    });
+  }
+
+  async listKnowledgeNodes(params?: ListKnowledgeNodesParams): Promise<ListKnowledgeNodesResponse> {
+    const search = new URLSearchParams();
+    if (params?.kind) search.set("kind", params.kind);
+    if (params?.status) search.set("status", params.status);
+    if (params?.limit !== undefined) search.set("limit", String(params.limit));
+    if (params?.offset !== undefined) search.set("offset", String(params.offset));
+    const raw = await this.fetch<unknown>(`/api/knowledge/nodes?${search}`);
+    return parseWithFallback(raw, ListKnowledgeNodesResponseSchema, EMPTY_LIST_KNOWLEDGE_NODES_RESPONSE, {
+      endpoint: "GET /api/knowledge/nodes",
+    });
+  }
+
+  async getKnowledgeNode(idOrSlug: string): Promise<GetKnowledgeNodeResponse> {
+    const raw = await this.fetch<unknown>(`/api/knowledge/nodes/${encodeURIComponent(idOrSlug)}`);
+    return parseWithFallback(raw, GetKnowledgeNodeResponseSchema, EMPTY_GET_KNOWLEDGE_NODE_RESPONSE, {
+      endpoint: "GET /api/knowledge/nodes/{id}",
+    });
+  }
+
+  async updateKnowledgeNode(idOrSlug: string, data: UpdateKnowledgeNodeRequest): Promise<GetKnowledgeNodeResponse> {
+    const raw = await this.fetch<unknown>(`/api/knowledge/nodes/${encodeURIComponent(idOrSlug)}`, {
+      method: "PUT",
+      body: JSON.stringify(data),
+    });
+    return parseWithFallback(raw, GetKnowledgeNodeResponseSchema, EMPTY_GET_KNOWLEDGE_NODE_RESPONSE, {
+      endpoint: "PUT /api/knowledge/nodes/{id}",
+    });
+  }
+
+  async listKnowledgeEdges(params: ListKnowledgeEdgesParams): Promise<ListKnowledgeEdgesResponse> {
+    const search = new URLSearchParams();
+    if (params.endpoint_id) {
+      search.set("endpoint_id", params.endpoint_id);
+      if (params.endpoint_type) search.set("endpoint_type", params.endpoint_type);
+      if (params.predicate) search.set("predicate", params.predicate);
+      if (params.include_closed) search.set("include_closed", "true");
+    } else if (params.status) {
+      // Review-queue mode: live edges in a given status, no endpoint filter.
+      search.set("status", params.status);
+    }
+    if (params.limit !== undefined) search.set("limit", String(params.limit));
+    const raw = await this.fetch<unknown>(`/api/knowledge/edges?${search}`);
+    return parseWithFallback(raw, ListKnowledgeEdgesResponseSchema, EMPTY_LIST_KNOWLEDGE_EDGES_RESPONSE, {
+      endpoint: "GET /api/knowledge/edges",
+    });
+  }
+
+  async getKnowledgeEdge(id: string): Promise<GetKnowledgeEdgeResponse> {
+    const raw = await this.fetch<unknown>(`/api/knowledge/edges/${encodeURIComponent(id)}`);
+    return parseWithFallback(raw, GetKnowledgeEdgeResponseSchema, EMPTY_GET_KNOWLEDGE_EDGE_RESPONSE, {
+      endpoint: "GET /api/knowledge/edges/{id}",
+    });
+  }
+
+  async updateKnowledgeEdgeStatus(id: string, status: string): Promise<{ edge: KnowledgeEdge }> {
+    const raw = await this.fetch<unknown>(`/api/knowledge/edges/${encodeURIComponent(id)}/status`, {
+      method: "PUT",
+      body: JSON.stringify({ status }),
+    });
+    return parseWithFallback(raw, KnowledgeEdgeEnvelopeSchema, { edge: EMPTY_KNOWLEDGE_EDGE }, {
+      endpoint: "PUT /api/knowledge/edges/{id}/status",
+    });
+  }
+
+  async getKnowledgeGraph(params: KnowledgeGraphParams): Promise<KnowledgeGraphResponse> {
+    const search = new URLSearchParams({ focus: params.focus });
+    if (params.focus_type) search.set("focus_type", params.focus_type);
+    if (params.hops !== undefined) search.set("hops", String(params.hops));
+    if (params.include_proposed) search.set("include_proposed", "true");
+    if (params.min_confidence) search.set("min_confidence", String(params.min_confidence));
+    if (params.limit !== undefined) search.set("limit", String(params.limit));
+    const raw = await this.fetch<unknown>(`/api/knowledge/graph?${search}`);
+    return parseWithFallback(raw, KnowledgeGraphResponseSchema, EMPTY_KNOWLEDGE_GRAPH_RESPONSE, {
+      endpoint: "GET /api/knowledge/graph",
+    });
+  }
+
+  async getKnowledgePath(params: KnowledgePathParams): Promise<KnowledgePathResponse> {
+    const search = new URLSearchParams({ src: params.src, dst: params.dst });
+    if (params.src_type) search.set("src_type", params.src_type);
+    if (params.dst_type) search.set("dst_type", params.dst_type);
+    if (params.max_hops !== undefined) search.set("max_hops", String(params.max_hops));
+    if (params.include_proposed) search.set("include_proposed", "true");
+    const raw = await this.fetch<unknown>(`/api/knowledge/path?${search}`);
+    return parseWithFallback(raw, KnowledgePathResponseSchema, EMPTY_KNOWLEDGE_PATH_RESPONSE, {
+      endpoint: "GET /api/knowledge/path",
     });
   }
 

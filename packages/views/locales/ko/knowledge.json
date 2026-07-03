@@ -1,0 +1,44 @@
+{
+  "title": "지식 그래프",
+  "tabs": {
+    "explore": "탐색",
+    "path": "경로",
+    "review": "검토"
+  },
+  "search": {
+    "placeholder": "지식 그래프 검색…",
+    "no_results": "일치하는 노드가 없습니다"
+  },
+  "filters": {
+    "hops": "홉 수",
+    "include_proposed": "제안된 항목 포함"
+  },
+  "explore": {
+    "empty": "노드를 검색해 그래프를 탐색하세요",
+    "truncated": "그래프가 잘렸습니다. 홉 수를 줄이거나 범위를 좁혀 더 확인하세요."
+  },
+  "panel": {
+    "summary": "요약",
+    "aliases": "별칭",
+    "connections": "연결",
+    "no_connections": "아직 연결이 없습니다",
+    "evidence": "근거",
+    "approve": "승인",
+    "reject": "거부",
+    "close": "닫기"
+  },
+  "review": {
+    "proposed_nodes": "제안된 노드",
+    "proposed_edges": "제안된 관계",
+    "approve": "승인",
+    "reject": "거부",
+    "empty": "검토할 항목이 없습니다"
+  },
+  "path": {
+    "find": "경로 찾기",
+    "source": "출발점",
+    "target": "도착점",
+    "not_found": "두 노드 사이의 경로를 찾을 수 없습니다",
+    "truncated": "전체 그래프를 탐색하기 전에 검색이 중단되었습니다"
+  }
+}

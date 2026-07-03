@@ -68,6 +68,35 @@ If the default ports (8080/3000) are in use:
 2. Run `make selfhost`
 3. Run `multica setup self-host --port <PORT> --frontend-port <FRONTEND_PORT>`
 
+## Knowledge Graph Semantic Search (optional)
+
+The workspace knowledge graph (`multica knowledge`) gains a semantic search
+arm when an embedding provider is configured. Without it, knowledge search
+is lexical-only — nothing else changes.
+
+Set these on the backend:
+
+```bash
+MULTICA_EMBEDDING_API_KEY=sk-...             # bearer token (optional for local providers)
+MULTICA_EMBEDDING_API_BASE=https://api.openai.com/v1   # any OpenAI-compatible /embeddings endpoint
+MULTICA_EMBEDDING_MODEL=text-embedding-3-small          # must produce 1536-dim vectors
+```
+
+Requirements and behavior:
+
+- The database needs the pgvector extension. The bundled
+  `pgvector/pgvector:pg17` image ships it; migration 129 enables it
+  automatically and skips gracefully when it is unavailable.
+- A background job (`knowledge_embedding_backfill`, every 5 minutes) embeds
+  new and edited knowledge nodes; changing the model re-embeds everything
+  incrementally.
+- The configured model must emit 1536-dimension vectors (the OpenAI
+  `text-embedding-3-*` family is requested at that size automatically).
+  A mismatched model fails loudly in the job log rather than writing bad
+  vectors.
+- Local keyless providers (Ollama, vLLM) work by setting only
+  `MULTICA_EMBEDDING_API_BASE`.
+
 ## Troubleshooting
 
 - **Backend not ready:** `docker compose -f docker-compose.selfhost.yml logs backend`

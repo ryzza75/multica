@@ -1,0 +1,569 @@
+# Knowledge Graph & Insight Discovery — Development Plan
+
+Status: proposal / RFC
+Scope: server, packages/core, packages/views, apps/web, apps/desktop, CLI, builtin skills
+
+## 1. Goal
+
+Turn the knowledge that accumulates in a Multica workspace — from issues, agent
+task output, research, documents, and deliberate note-taking — into a typed,
+provenance-tracked knowledge graph that can be:
+
+1. **Queried multi-hop** ("how is author X connected to market trend Y?"),
+2. **Visualized** as an interactive node/edge explorer (web + desktop),
+3. **Read and written by agents** (Hermes, Claude, Kimi, Kiro — any runtime),
+4. **Retrieved semantically** (RAG over node content and source documents),
+5. **Kept organised, standardised, and complete** via an explicit ontology,
+   dedup rules, mandatory provenance, and a review/curation loop.
+
+Node kinds are open-ended by design: people, organizations, events, concepts,
+ideas, claims/facts, works (books/papers/articles), brands, markets,
+technologies, places — plus Multica's own entities (issues, projects, agents,
+members) so work items and knowledge live in one connected graph.
+
+## 2. Current state (audited)
+
+What exists today and what does not — this plan builds on the former and
+creates the latter:
+
+| Capability | State |
+| --- | --- |
+| Wiki / document store | **Does not exist.** `project_resource` is a typed JSONB pointer (`github_repo`, `local_directory`) with no content body. No `document`/`page` table anywhere in `server/migrations/`. |
+| RAG / embeddings | **Does not exist.** No `CREATE EXTENSION vector`, no embedding columns. Search is pg_bigm + `LIKE` (`032_issue_search_index.up.sql`, `buildProjectSearchQuery`). |
+| pgvector availability | **Provisioned everywhere but unused**: CI (`.github/workflows/ci.yml`), `docker-compose.yml`, `docker-compose.selfhost.yml` all run `pgvector/pgvector:pg17`. Enabling the extension is a migration away. |
+| Graph edges | Bespoke per-pair tables only. `issue_dependency` (`blocks`/`blocked_by`/`related`) is the closest existing typed edge. No generic edge table, no resource↔resource or resource↔issue links. |
+| Graph visualization | **No dependency exists** (no d3/cytoscape/sigma/react-flow anywhere). |
+| Runtime-native agent memory | **Exists, but at the runtime level and outside Multica's control — and each runtime is handled differently today.** Codex ships a native auto-memory subsystem (`$CODEX_HOME/memories/raw_memories.md` + sqlite state); the daemon deliberately disables it in managed tasks (`execenv/codex_memory.go`) because it is opaque, uneditable from any Multica UI, and leaked host-project memories across workspaces (multica#3130). Escape hatch: `MULTICA_CODEX_MEMORY=1`. OpenClaw keeps wiki/markdown-style memory in the agent workspace (SOUL.md, MEMORY.md, standing orders, daily memory files); the daemon pins every OpenClaw agent workspace to the task workdir for per-task skill discovery, with the documented cost that host-level SOUL.md / MEMORY.md are **not visible** to in-task runs — "task isolation wins over host carry-over" (`execenv/openclaw_config.go:157-167`). Hermes self-loads AGENTS.md / `.agent_context` from cwd (the daemon skips `SystemPrompt` for it, `agent/hermes.go`); no daemon-side scoping of its native memory exists. `codex_memory.go`'s header names the intended end state: "a Multica-owned, user-visible, project- or issue-scoped memory store." |
+| Agent context injection | Exists and is the key integration seam: `server/internal/daemon/execenv/context.go` writes `.agent_context/issue_context.md`, provider-native skills, and `.multica/project/resources.json` into every task's working directory. |
+| Agent write path | Exists: the `multica` CLI + builtin skills (`server/internal/service/builtin_skills/*`) teach every runtime, including Hermes (ACP backend, `server/pkg/agent/hermes.go`), how to mutate durable workspace state. |
+
+Conclusion: the knowledge substrate is greenfield, but every integration seam
+it needs (polymorphic actor pattern, CLI-as-agent-API, skill injection, sidecar
+context files, sqlc/chi/TanStack pipeline) already exists and should be reused
+verbatim.
+
+## 3. Architecture decision
+
+**One substrate, three views over it.** The knowledge base, the wiki, and the
+RAG corpus are not three systems — they are three access patterns over the
+same two tables:
+
+- A **node** (`knowledge_node`) is simultaneously a graph vertex, a wiki page
+  (its `content` is markdown), and a RAG chunk source (its embedding).
+- An **edge** (`knowledge_edge`) is a typed, directed, provenance-carrying
+  relationship. Edge endpoints are polymorphic `(type, id)` pairs — matching
+  the pervasive Multica pattern (`assignee_type`/`assignee_id`) — so edges can
+  connect knowledge nodes to each other **and** to internal entities (issues,
+  projects, agents, members) without mirroring those entities into the graph.
+- A **source** (`knowledge_source`) is the provenance anchor: the URL,
+  document, comment, or task output a fact came from, chunked and embedded
+  for retrieval.
+
+Everything is workspace-scoped (`workspace_id` on every table, every query
+filtered by it, `X-Workspace-ID` selects it), consistent with the domain rule.
+
+Graph queries (N-hop neighborhoods, paths) run server-side as recursive CTEs
+with hop and fan-out limits. Postgres is sufficient for the target scale
+(tens of thousands of nodes per workspace); no separate graph database.
+
+### 3.1 The graph IS the memory store (relationship to Hermes/Codex native memory)
+
+Runtime-native memory already exists — Hermes keeps its own memory/context,
+Codex ships LLM-style auto-memory, OpenClaw keeps wiki-style markdown memory
+(SOUL.md / MEMORY.md / standing orders) in its agent workspace — and the
+daemon's stance on it is already on record: Codex native memory is disabled
+in managed tasks (`codex_memory.go`) because it is opaque, unauditable, and
+leaks across workspaces; OpenClaw's host memory is cut off in managed tasks
+as a side effect of workspace pinning ("task isolation wins over host
+carry-over", `openclaw_config.go`); and the long-term answer named in
+`codex_memory.go` is a Multica-owned, user-visible, scoped memory store.
+
+**This knowledge graph is that store.** Three consequences:
+
+1. **Native memory is an ingestion source, never a peer store.** Runtime
+   memories (OpenClaw MEMORY.md / daily memory files written during a task,
+   Hermes memory, Codex `raw_memories.md` where a user has opted it back on)
+   enter the graph as `knowledge_source` rows with
+   `source_type='runtime_memory'` and flow through the same extraction →
+   `proposed` → curation pipeline as everything else. They are treated as
+   *claims by an agent*, with provenance, not as truth. OpenClaw is the
+   easiest to ingest: its memory is plain markdown in the (daemon-pinned)
+   task workspace, so a teardown hook can capture it verbatim. A one-time
+   import of existing host-level OpenClaw MEMORY.md files is also the
+   cheapest way to seed the graph with knowledge already accumulated.
+2. **Write-back replaces private memory.** The `multica-knowledge` builtin
+   skill (Phase 2) teaches agents to persist durable learnings to the graph
+   via the CLI instead of relying on their runtime's private memory. That is
+   what makes memory survive runtime switches: something learned during a
+   Hermes task is available to a Claude or Kimi task, and vice versa — none
+   of the runtime-native stores can do that.
+3. **One memory, not two.** Once graph write-back and knowledge-context
+   injection (Phase 3) exist, runtime-native auto-memory should stay disabled
+   in managed tasks (as Codex's already is), so there is never a second,
+   invisible memory diverging from the curated one. Hermes needs an explicit
+   decision here (see §8): today its native memory is neither scoped nor
+   disabled by the daemon — if it persists memory across sessions the way
+   Codex does, it needs a `hermes_memory.go` analog (disable in managed
+   tasks, env-var escape hatch) for the same cross-task/cross-workspace
+   leak reasons.
+
+4. **Graph-backed memory injection, per runtime's native read path.** The
+   daemon already controls what each runtime sees as its context. For
+   OpenClaw this is especially clean: because every agent workspace is
+   pinned to the task workdir, execenv can render relevant graph knowledge
+   into a synthesized per-task `MEMORY.md` (and standing-orders equivalents)
+   that OpenClaw reads natively — restoring exactly what workspace pinning
+   took away, except the memory is now curated, provenance-backed, and
+   workspace-scoped instead of uncontrolled host carry-over. Other runtimes
+   get the generic `.multica/knowledge/context.json` + brief section from
+   Phase 3; OpenClaw additionally gets the native-format render.
+
+The wiki angle follows from the same decision: a node's markdown `content` is
+the user-visible, editable "memory page" — what runtime auto-memory keeps in
+hidden files (or per-agent workspace files that managed tasks can't see), the
+graph keeps as wiki pages with provenance and history.
+
+### 3.2 One intake pipeline for every memory write
+
+How Multica *manages* the memory requirement: every write converges on a
+single service-layer intake, regardless of origin — UI edits, `multica
+knowledge` CLI calls from agents, the extraction autopilot, runtime-memory
+ingestion at task teardown, one-time imports. Five stages:
+
+1. **Normalize** — map to kinds/predicates, canonicalize title/slug.
+2. **Resolve** — entity resolution against existing nodes (slug, alias,
+   external-id, vector similarity); attach to an existing node or create.
+3. **Reconcile** — fact-level merge (§4.6): a claim identical to a live edge
+   *affirms* it (new evidence row, `last_affirmed_at` bump) instead of
+   duplicating it; a conflicting claim on a single-valued predicate proposes
+   supersedence; anything genuinely new creates an edge.
+4. **Gate** — trust-based status: human assertions and designated curator
+   agents land `confirmed`; extraction and runtime-memory ingestion land
+   `proposed`.
+5. **Publish** — realtime events, embedding-job enqueue.
+
+No writer bypasses reconciliation. That is the property that lets the graph
+grow continually without accumulating duplicates, and lets new information
+*update* old facts instead of piling up beside them.
+
+## 4. Ontology and standards
+
+This is what makes the graph "organised, standardised, complete" instead of
+sludge. It ships as code (enums + validation) and as a builtin skill so agents
+follow it.
+
+### 4.1 Node kinds (initial set)
+
+`person`, `organization`, `brand`, `concept`, `idea`, `claim`, `event`,
+`work` (book/paper/article/talk), `technology`, `market`, `place`, `note`.
+
+Kinds are a server-validated enum with a `default` branch client-side (per the
+API-compatibility rule: server-driven enums always need a `default`). Each
+kind defines expected `attrs` keys (e.g. `person`: `org`, `role`, `links`;
+`work`: `author`, `year`, `url`, `isbn`) — validated leniently (unknown keys
+allowed, known keys type-checked).
+
+### 4.2 Canonical predicates (initial set)
+
+Directed, snake_case, small and closed to start:
+
+- Structure: `part_of`, `instance_of`, `related_to`
+- People/orgs: `works_at`, `founded`, `member_of`, `knows`, `advised_by`
+- Ideas/works: `authored`, `cites`, `supports`, `contradicts`, `influenced`,
+  `derived_from`
+- Events: `occurred_at`, `participated_in`, `caused`
+- Work items: `mentions`, `evidence_for`, `produced_by` (issue/task → node)
+
+New predicates require adding to the enum — deliberate friction that keeps the
+edge vocabulary queryable. Free-text nuance goes in `edge.attrs.note`.
+
+### 4.3 Identity and dedup rules
+
+- Every node has a workspace-unique `slug` (kebab-case of canonical title) and
+  an `aliases` JSONB array. **Create flow is search-first**: the API's create
+  endpoint returns `409` with candidate matches (slug/alias/trigram + vector
+  similarity) unless `confirm_new=true` is passed. The CLI and the skill
+  encode this: search, then create.
+- External identifiers live in `attrs.external_ids` (`url`, `isbn`, `doi`,
+  `orcid`, `domain`) and participate in dedup matching.
+- A `merge` endpoint re-points edges and folds aliases; merges are recorded so
+  old IDs resolve (redirect row, not hard delete).
+
+### 4.4 Provenance and confidence
+
+- An edge is a *claim*; its proof lives in `knowledge_evidence` rows — one
+  per (source, stance), where stance is `supports` or `contradicts`. The
+  edge's `confidence` float is a cached value recomputed from its evidence
+  set (recency-weighted; contradictions subtract). Human-asserted edges get
+  a synthetic `manual` source so even they answer "says who?".
+- Every node/edge records `created_by_type`/`created_by_id`
+  (`member`/`agent`) — same polymorphic actor pattern as `issue.creator_type`.
+
+### 4.5 Curation states
+
+Agent-extracted material lands as `status='proposed'`; humans (or a trusted
+curator agent) promote to `confirmed` or reject. The graph view filters to
+`confirmed` by default with a toggle to show proposed material. This is the
+quality gate that keeps automated extraction from polluting the graph.
+
+### 4.6 Fact lifecycle: growth, affirmation, staleness, supersedence
+
+The graph must grow **and stay current**. Four mechanisms:
+
+- **Evidence accumulates; edges don't duplicate.** Re-encountering a known
+  fact strengthens it — a new `knowledge_evidence` row and a
+  `last_affirmed_at` bump — rather than creating a twin edge (§3.2 stage 3).
+- **Temporal validity, not deletion.** Edges carry `valid_from`/`valid_until`.
+  A fact that stops being true (a person changes jobs, a market claim
+  expires) is *closed* — `valid_until` set, `superseded_by` pointing at its
+  replacement — never deleted. The graph can be rendered "as of" any date,
+  and the history is itself knowledge.
+- **Single-valued predicates auto-reconcile.** Predicates are declared
+  functional or multi-valued in code (`works_at` is functional; `authored`
+  is multi-valued). A new confirmed claim on a functional predicate with a
+  different object proposes closing the old edge — via the review queue for
+  agent-derived claims, immediately for human assertions.
+- **Volatility classes drive re-verification.** Each predicate declares a
+  volatility: immutable (`authored`, `occurred_at`), slow (`founded`,
+  `part_of`), or volatile (`works_at`, market/trend claims). A fact is
+  *stale* when `last_affirmed_at` exceeds its class threshold. The Phase 5
+  re-verification autopilot walks stale facts and has an agent re-check each
+  against fresh sources, filing affirming or superseding evidence — this is
+  what makes the knowledge base update itself instead of only accreting.
+
+## 5. Schema (migration `128_knowledge_graph`)
+
+```sql
+CREATE EXTENSION IF NOT EXISTS vector;  -- pgvector image ships it everywhere
+
+CREATE TABLE knowledge_node (
+    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    workspace_id    UUID NOT NULL REFERENCES workspace(id) ON DELETE CASCADE,
+    kind            TEXT NOT NULL,          -- validated enum, see 4.1
+    slug            TEXT NOT NULL,
+    title           TEXT NOT NULL,
+    aliases         JSONB NOT NULL DEFAULT '[]',
+    summary         TEXT,                   -- one-liner for graph tooltips
+    content         TEXT,                   -- markdown body = the wiki page
+    attrs           JSONB NOT NULL DEFAULT '{}',
+    status          TEXT NOT NULL DEFAULT 'confirmed'
+                    CHECK (status IN ('proposed','confirmed','rejected')),
+    embedding       vector(1536),           -- nullable until embed job runs
+    embedding_model TEXT,
+    created_by_type TEXT NOT NULL CHECK (created_by_type IN ('member','agent')),
+    created_by_id   UUID NOT NULL,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (workspace_id, slug)
+);
+
+CREATE TABLE knowledge_source (
+    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    workspace_id    UUID NOT NULL REFERENCES workspace(id) ON DELETE CASCADE,
+    source_type     TEXT NOT NULL,          -- url | document | comment | issue | task_output | manual
+    source_ref      JSONB NOT NULL,         -- {url} | {issue_id} | {comment_id} | {task_id} ...
+    title           TEXT,
+    content         TEXT,                   -- captured text for chunking/RAG
+    created_by_type TEXT NOT NULL,
+    created_by_id   UUID NOT NULL,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE knowledge_edge (
+    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    workspace_id    UUID NOT NULL REFERENCES workspace(id) ON DELETE CASCADE,
+    src_type        TEXT NOT NULL CHECK (src_type IN ('node','issue','project','agent','member')),
+    src_id          UUID NOT NULL,
+    dst_type        TEXT NOT NULL CHECK (dst_type IN ('node','issue','project','agent','member')),
+    dst_id          UUID NOT NULL,
+    predicate       TEXT NOT NULL,          -- validated enum, see 4.2
+    confidence      REAL NOT NULL DEFAULT 1.0,  -- cached; recomputed from evidence
+    attrs           JSONB NOT NULL DEFAULT '{}',
+    status          TEXT NOT NULL DEFAULT 'confirmed'
+                    CHECK (status IN ('proposed','confirmed','rejected')),
+    valid_from      TIMESTAMPTZ,            -- null = unknown start
+    valid_until     TIMESTAMPTZ,            -- null = still valid (live edge)
+    superseded_by   UUID REFERENCES knowledge_edge(id) ON DELETE SET NULL,
+    last_affirmed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    created_by_type TEXT NOT NULL,
+    created_by_id   UUID NOT NULL,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+-- Uniqueness applies to LIVE edges only, so a closed fact can recur later
+-- (someone rejoins a company) without violating the constraint:
+CREATE UNIQUE INDEX uq_knowledge_edge_live
+    ON knowledge_edge (workspace_id, src_type, src_id, dst_type, dst_id, predicate)
+    WHERE valid_until IS NULL;
+
+CREATE TABLE knowledge_evidence (            -- per-source proof for an edge
+    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    workspace_id    UUID NOT NULL REFERENCES workspace(id) ON DELETE CASCADE,
+    edge_id         UUID NOT NULL REFERENCES knowledge_edge(id) ON DELETE CASCADE,
+    source_id       UUID NOT NULL REFERENCES knowledge_source(id) ON DELETE CASCADE,
+    stance          TEXT NOT NULL DEFAULT 'supports'
+                    CHECK (stance IN ('supports','contradicts')),
+    note            TEXT,
+    created_by_type TEXT NOT NULL,
+    created_by_id   UUID NOT NULL,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (edge_id, source_id, stance)
+);
+
+CREATE TABLE knowledge_node_revision (       -- wiki-page edit history
+    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    workspace_id    UUID NOT NULL REFERENCES workspace(id) ON DELETE CASCADE,
+    node_id         UUID NOT NULL REFERENCES knowledge_node(id) ON DELETE CASCADE,
+    content         TEXT,
+    summary         TEXT,
+    edited_by_type  TEXT NOT NULL,
+    edited_by_id    UUID NOT NULL,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE knowledge_chunk (               -- RAG unit for long sources
+    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    workspace_id    UUID NOT NULL REFERENCES workspace(id) ON DELETE CASCADE,
+    source_id       UUID NOT NULL REFERENCES knowledge_source(id) ON DELETE CASCADE,
+    position        INT NOT NULL,
+    content         TEXT NOT NULL,
+    embedding       vector(1536),
+    embedding_model TEXT
+);
+
+CREATE INDEX idx_knowledge_edge_src ON knowledge_edge (workspace_id, src_type, src_id);
+CREATE INDEX idx_knowledge_edge_dst ON knowledge_edge (workspace_id, dst_type, dst_id);
+CREATE INDEX idx_knowledge_node_ws_kind ON knowledge_node (workspace_id, kind);
+-- HNSW indexes added in the RAG phase, after an embedding backfill exists:
+-- CREATE INDEX ... USING hnsw (embedding vector_cosine_ops);
+```
+
+Node deletion: knowledge-node endpoints handle edge cleanup for `node`-type
+endpoints; internal-entity endpoints (issue/project/...) get dangling-edge
+garbage collection in the read path plus a periodic sweep, since those tables
+can't carry FKs into `knowledge_edge`'s polymorphic columns.
+
+## 6. Delivery phases
+
+Each phase is independently shippable and useful on its own.
+
+### Phase 1 — Substrate: schema, API, CLI
+
+Server:
+- Migration `128_knowledge_graph` (+ `.down.sql`), sqlc queries in
+  `server/pkg/db/queries/knowledge.sql`, `make sqlc`.
+- Handlers in `server/internal/handler/knowledge.go` following
+  `project_resource.go`'s shape (validation switch per kind/predicate is the
+  extension seam, mirroring `validateAndNormalizeResourceRef`).
+- Routes in `server/cmd/server/router.go`:
+
+```
+GET    /api/knowledge/nodes                 list (kind, status, q filters)
+POST   /api/knowledge/nodes                 create (dedup-checked; 409 + candidates)
+GET    /api/knowledge/nodes/{id}            get (accepts slug or UUID via loader)
+PUT    /api/knowledge/nodes/{id}            update
+DELETE /api/knowledge/nodes/{id}
+POST   /api/knowledge/nodes/{id}/merge      merge into another node
+GET    /api/knowledge/edges                 list (src/dst/predicate/live filters)
+POST   /api/knowledge/edges                 create (reconciled: may affirm instead)
+POST   /api/knowledge/edges/{id}/evidence   attach supporting/contradicting evidence
+POST   /api/knowledge/edges/{id}/close      set valid_until (+ optional superseded_by)
+DELETE /api/knowledge/edges/{id}
+POST   /api/knowledge/sources               capture a source (url/text/ref)
+GET    /api/knowledge/graph                 neighborhood: ?focus=&hops=&kinds=&predicates=&min_confidence=&status=&as_of=&limit=
+GET    /api/knowledge/path                  ?src=&dst=&max_hops=   (bidirectional BFS)
+GET    /api/knowledge/search                hybrid search (Phase 3 adds vector arm)
+```
+
+- UUID handling per the backend rules: path params through a
+  `loadKnowledgeNodeForUser`-style loader (accepts slug or UUID), body UUIDs
+  via `parseUUIDOrBadRequest`.
+- Realtime: `EventKnowledgeNodeCreated/Updated/...` in
+  `server/pkg/protocol/events.go`, published via `h.publish`.
+
+CLI (`server/cmd/multica/cmd_knowledge.go`):
+
+```bash
+multica knowledge search "<query>" --kind person --output json
+multica knowledge node add --kind person --title "Jane Doe" --summary "..." --output json
+multica knowledge node get <slug-or-id> --output json
+multica knowledge edge add --src <node> --dst <node> --predicate influenced \
+    --confidence 0.8 --source-url <url> --output json
+multica knowledge link-issue <issue-id> --node <node> --predicate mentions
+multica knowledge graph <node> --hops 2 --output json
+multica knowledge path <node-a> <node-b> --output json
+```
+
+The graph/path CTE caps: `hops ≤ 4`, per-hop fan-out ≤ 50 (highest-confidence
+first), total nodes ≤ 500 per response, and the response reports what was
+truncated so callers know coverage was bounded.
+
+### Phase 2 — Agent write path (Hermes + all runtimes)
+
+This is deliberately runtime-agnostic: agents integrate through the `multica`
+CLI and builtin skills, exactly like `multica-projects-and-resources`. Hermes
+needs nothing Hermes-specific — the daemon already injects skills into every
+runtime's working directory (`execenv/context.go`).
+
+- New builtin skill `server/internal/service/builtin_skills/multica-knowledge/`
+  (`SKILL.md` + `references/knowledge-source-map.md`, per the CLAUDE.md rule
+  that CLI-behavior skills ship with a source map). It teaches:
+  - **search-first**: always `multica knowledge search` before `node add`;
+  - when to capture (novel person/org/concept/claim encountered during
+    research or issue work; explicit user asks like "remember this");
+  - provenance is mandatory for extracted facts (`--source-url` /
+    `--source-ref`);
+  - extracted material defaults to `--status proposed`; only human-instructed
+    assertions go in as confirmed;
+  - kind/predicate vocabulary and the attrs conventions from §4.
+- **Extraction autopilot**: an autopilot (existing `autopilot` machinery) that
+  runs an agent over new/updated issues, comments, and completed task outputs,
+  proposing nodes/edges with provenance. Batched (e.g. daily), not per-event.
+- **Runtime-memory ingestion** (per §3.1) — *deferred to Phase 2b*: it is the
+  only Phase 2 item that touches daemon/execenv teardown paths, so it ships
+  separately once the skill-driven write-back path (which achieves the same
+  goal with zero daemon risk) has proven itself. A task-teardown hook
+  (alongside the existing `sidecar_manifest` cleanup) that captures
+  runtime-written memory artifacts from the working directory as
+  `knowledge_source` rows
+  (`source_type='runtime_memory'`, ref carries agent/task/runtime), feeding
+  the same extraction pipeline. Opt-in per agent, since it reads what the
+  runtime chose to remember. For OpenClaw this means the workspace
+  MEMORY.md / daily memory files (plain markdown, trivially capturable);
+  include a one-time `multica knowledge import` path for existing host-level
+  OpenClaw memory to seed the graph.
+- **Curation queue**: `status='proposed'` items surface in a review list
+  (Phase 4 UI) with accept/reject/merge actions; a scheduled "gardener" agent
+  can also merge obvious duplicates and fill missing summaries, using the same
+  CLI.
+
+### Phase 3 — RAG layer
+
+- Embedding worker in the server (job on node create/update and source
+  chunking; model + endpoint configured like other provider settings; store
+  `embedding_model` per row so re-embeds are incremental). Add HNSW indexes
+  once backfill exists.
+- `GET /api/knowledge/search` becomes hybrid: pg_bigm/ILIKE arm + cosine arm,
+  merged with reciprocal-rank fusion. CLI: `multica knowledge search --semantic`.
+- **Context injection**: extend `execenv` to write
+  `.multica/knowledge/context.json` next to `resources.json` — top-K nodes
+  relevant to the task brief (vector search on issue title/description), each
+  with slug, summary, and top edges. The runtime brief gains a short
+  `## Knowledge Context` section. This closes the loop: agents read graph
+  knowledge without being asked, in every runtime including Hermes.
+- **OpenClaw native render** (per §3.1 point 4): for OpenClaw tasks, also
+  render the same top-K knowledge into a synthesized per-task `MEMORY.md` in
+  the pinned workspace so OpenClaw consumes it through its native memory
+  read path. Tracked in the sidecar manifest like other daemon-written files.
+
+### Phase 4 — Graph visualization (web + desktop)
+
+Follows the shared-feature recipe exactly (views in `packages/views`, platform
+wiring per app, `useNavigation`, `wsId`-keyed queries).
+
+- **Library: `graphology` (model + algorithms) + `sigma` (WebGL renderer)**,
+  declared in `packages/views/package.json` (and `catalog:` if reused).
+  Rationale: WebGL handles thousands of nodes where SVG/d3 stalls;
+  graphology ships the algorithms this feature is about (shortest path,
+  neighborhoods, louvain communities, betweenness). react-flow is the wrong
+  tool (DAG editor, not force-directed exploration); cytoscape is viable but
+  heavier and canvas-bound.
+- `packages/core/knowledge/`: zod schemas parsed via `parseWithFallback`
+  (mandatory — network JSON is never cast), query hooks
+  (`knowledgeKeys` factory including `wsId`), mutations optimistic-by-default.
+  Client-side `kind`/`predicate` handling always has a `default` branch.
+- `packages/views/knowledge/`:
+  - `knowledge-graph-page.tsx` — the sigma canvas. UX spec:
+    - **Entry is search-first**: a prominent search box (hybrid search)
+      focuses the graph on a chosen node; issues/projects get a
+      "view in graph" affordance that deep-links here with them as focus.
+    - **Incremental exploration**: single-click selects (side panel),
+      click on the expand badge fetches that node's next hop; double-click
+      re-focuses and re-centers. Never load the whole graph — the world
+      grows outward from where you're looking.
+    - **Visual encoding**: color by kind (small token-derived palette),
+      node size by degree, edge thickness by confidence, dashed edges for
+      `proposed`, muted/ghosted for closed (`valid_until` set; hidden by
+      default). Hover shows a card: title, kind, summary, last-affirmed.
+    - **Freshness overlay**: a toggle that halos stale volatile facts
+      (§4.6) so "what needs re-verification" is visible at a glance.
+    - **Time travel**: a timeline scrubber wired to `as_of` — watch the
+      graph as it existed at any date; superseded facts reappear in their
+      valid window. This is the payoff of temporal edges.
+    - **Filter rail**: kind, predicate, min-confidence, status, date range;
+      community-coloring toggle (graphology louvain).
+    - **Saved views**: named filter+focus combos persisted in the Zustand
+      store (client state; filters persist, graph data never does).
+    - **Performance**: ForceAtlas2 layout in a web worker
+      (`graphology-layout-forceatlas2`), sigma WebGL rendering, server-side
+      caps + incremental expansion keep any single response bounded.
+  - `node-panel.tsx` — side panel: markdown `content` (the wiki page, with
+    revision history from `knowledge_node_revision`), per-edge evidence
+    list (supports/contradicts with sources), connected issues/projects,
+    edit affordances. Editing here is the human half of the memory loop.
+  - `path-finder.tsx` — pick two nodes → render the connecting path(s);
+    this is the multi-hop "how are these related?" feature.
+  - `knowledge-review.tsx` — curation queue: proposed nodes/edges,
+    contradiction flags, and pending supersedence proposals, with
+    accept/reject/merge actions.
+- App wiring: `apps/web/app/[slug]/knowledge/page.tsx` + desktop session
+  route (tab destination, not overlay). Semantic tokens only for chrome;
+  graph-specific colors defined as a small token-derived palette.
+- Filter/viewport state is client state → Zustand store in `packages/core`
+  (persist filters, not graph data).
+
+### Phase 5 — Insight discovery
+
+The "tell me something I didn't know" layer, built on Phases 1–4:
+
+- **Staleness re-verification autopilot** (§4.6): walks volatile/slow facts
+  past their affirmation threshold, has an agent re-check each against fresh
+  sources (web search + existing evidence), and files affirming or
+  superseding evidence through the intake pipeline. Closes the loop that
+  makes the knowledge base self-updating, not just self-growing.
+- **Weekly insight digest** (autopilot → inbox): new nodes/edges, newly
+  formed communities, bridge nodes (high betweenness = concepts connecting
+  otherwise-separate clusters), shortest new paths between previously
+  disconnected regions.
+- **Link prediction**: embedding-similar but unconnected node pairs, and
+  co-citation suggestions ("A and B are cited by 4 shared sources but not
+  linked") — surfaced as `proposed` edges into the curation queue, never
+  auto-confirmed.
+- **Question answering over the graph**: agent chat pattern — retrieve
+  (hybrid search) → expand (graph neighborhood via CLI) → synthesize with
+  citations to nodes/sources.
+
+## 7. Testing and verification (per repo conventions)
+
+- Go: handler tests for CRUD, dedup-409, merge, CTE bounds; `make test`.
+- `packages/core/knowledge/*.test.ts`: schema parsing including
+  **malformed-response tests** (required for every new endpoint), query-key
+  scoping, optimistic rollback.
+- `packages/views/knowledge/*.test.tsx`: panel/review components (no `next/*`
+  or router mocks; Zustand callable-store mocks; `@multica/core/api` mocked).
+  The sigma canvas itself gets a thin wrapper so tests target the data →
+  graphology-model mapping, not WebGL.
+- E2E: one `e2e/knowledge.spec.ts` flow (create nodes/edge via `TestApiClient`,
+  open graph, expand, follow path) once Phase 4 lands.
+- Docs: user docs page under `apps/docs/content/docs/` and glossary additions
+  to `conventions.mdx`/`conventions.zh.mdx` for the new terms (node, edge,
+  predicate, provenance) before writing any zh UI copy.
+
+## 8. Open decisions
+
+1. **Embedding provider/model** (Phase 3): server-side calls need a configured
+   provider; dimension is baked into the column type (1536 assumed — cheap to
+   change before Phase 3 ships, annoying after).
+2. **Extraction aggressiveness default**: opt-in per project vs on-everything.
+   Recommended: opt-in per project first; widen after the curation loop proves
+   signal/noise is acceptable.
+3. **Auto-linking issues↔nodes** on mention detection (like PR linking scans
+   in `multica-working-on-issues`): nice, but deferred until the vocabulary
+   stabilizes.
+4. **Hermes native memory policy**: audit what the Hermes runtime actually
+   persists across sessions. If it keeps durable memory the way Codex does,
+   add a `hermes_memory.go` analog (disable in managed tasks + env-var escape
+   hatch, mirroring `MULTICA_CODEX_MEMORY`); if its memory is session-scoped
+   only, document that and leave it alone. Either way the graph write-back
+   path from §3.1 is the sanctioned durable memory.
+5. **Mobile**: read-only graph later, if ever — mobile is independent by
+   design and out of scope here.

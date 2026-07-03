@@ -83,6 +83,14 @@ const (
 	EventProjectResourceUpdated = "project_resource:updated"
 	EventProjectResourceDeleted = "project_resource:deleted"
 
+	// Knowledge graph
+	EventKnowledgeNodeCreated = "knowledge_node:created"
+	EventKnowledgeNodeUpdated = "knowledge_node:updated"
+	EventKnowledgeNodeDeleted = "knowledge_node:deleted"
+	EventKnowledgeEdgeCreated = "knowledge_edge:created"
+	EventKnowledgeEdgeUpdated = "knowledge_edge:updated"
+	EventKnowledgeEdgeDeleted = "knowledge_edge:deleted"
+
 	// Label events
 	EventLabelCreated       = "label:created"
 	EventLabelUpdated       = "label:updated"

@@ -1,0 +1,44 @@
+{
+  "title": "知识图谱",
+  "tabs": {
+    "explore": "探索",
+    "path": "路径",
+    "review": "审核"
+  },
+  "search": {
+    "placeholder": "搜索知识图谱…",
+    "no_results": "没有匹配的节点"
+  },
+  "filters": {
+    "hops": "跳数",
+    "include_proposed": "包含待审内容"
+  },
+  "explore": {
+    "empty": "搜索一个节点，开始探索知识图谱",
+    "truncated": "图谱已截断 —— 减少跳数或聚焦更小的范围查看更多。"
+  },
+  "panel": {
+    "summary": "摘要",
+    "aliases": "别名",
+    "connections": "关联",
+    "no_connections": "暂无关联",
+    "evidence": "证据",
+    "approve": "通过",
+    "reject": "拒绝",
+    "close": "关闭"
+  },
+  "review": {
+    "proposed_nodes": "待审节点",
+    "proposed_edges": "待审关系",
+    "approve": "通过",
+    "reject": "拒绝",
+    "empty": "暂无待审内容"
+  },
+  "path": {
+    "find": "查找路径",
+    "source": "起点",
+    "target": "终点",
+    "not_found": "这两个节点之间没有找到路径",
+    "truncated": "搜索在覆盖整个图谱前被截断"
+  }
+}
