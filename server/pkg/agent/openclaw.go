@@ -29,6 +29,16 @@ const openclawNoParseableOutput = "openclaw returned no parseable output"
 // of "openclaw returned no parseable output".
 const minOpenclawVersion = "2026.5.5"
 
+// openclawVersionTimeout bounds a single `openclaw --version` probe run at
+// the top of Execute. Without a bound, a wedged CLI — e.g. one blocked
+// trying to reach an unreachable Gateway/PaperClip endpoint — hangs this
+// call forever, since the outer ctx passed into Execute has no deadline of
+// its own (opts.Timeout is only applied to the run started after this
+// check). That makes an outage look like the whole daemon has stalled
+// rather than surfacing a clear, fast error. Mirrors claude.go's
+// detectVersionTimeout. A var (not const) so tests can shrink it.
+var openclawVersionTimeout = 10 * time.Second
+
 // openclawVersionPattern extracts a three-segment dotted version from
 // arbitrary `openclaw --version` output (e.g. "openclaw 2026.5.5",
 // "openclaw v2026.5.5 c37871e").
@@ -84,15 +94,20 @@ func (b *openclawBackend) Execute(ctx context.Context, prompt string, opts ExecO
 	cmd.Env = buildEnv(b.cfg.Env)
 
 	// openclaw writes its --json output to stdout. Stderr carries log
-	// overflow (security warnings, tool errors, etc.) — capture it via a
-	// log writer so it surfaces in daemon logs without being fed into the
-	// JSON parser.
+	// overflow (security warnings, tool errors, etc.) — capture it into both
+	// the daemon log (as before) and a bounded tail buffer so we can include
+	// the last few KB in Result.Error when openclaw exits unexpectedly.
+	// Without the tail, a connectivity failure (e.g. an unreachable
+	// Gateway/PaperClip endpoint) looks like the opaque "openclaw exited
+	// with error: exit status 1" — indistinguishable from any other
+	// failure and impossible to root-cause without crawling daemon logs.
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		cancel()
 		return nil, fmt.Errorf("openclaw stdout pipe: %w", err)
 	}
-	cmd.Stderr = newLogWriter(b.cfg.Logger, "[openclaw:stderr] ")
+	stderrBuf := newStderrTail(newLogWriter(b.cfg.Logger, "[openclaw:stderr] "), agentStderrTailBytes)
+	cmd.Stderr = stderrBuf
 
 	if err := cmd.Start(); err != nil {
 		cancel()
@@ -131,6 +146,15 @@ func (b *openclawBackend) Execute(ctx context.Context, prompt string, opts ExecO
 		} else if exitErr != nil && scanResult.status == "completed" {
 			scanResult.status = "failed"
 			scanResult.errMsg = fmt.Sprintf("openclaw exited with error: %v", exitErr)
+		}
+
+		// cmd.Wait() has returned — os/exec's stderr copy goroutine has
+		// observed every byte openclaw wrote to stderr before exiting, so
+		// stderrBuf.Tail() is safe to sample now. Attach the tail to any
+		// non-empty failure message; callers upstream surface this as the
+		// task's error field, which is the only place users see it.
+		if scanResult.errMsg != "" {
+			scanResult.errMsg = withAgentStderr(scanResult.errMsg, "openclaw", stderrBuf.Tail())
 		}
 
 		b.cfg.Logger.Info("openclaw finished", "pid", cmd.Process.Pid, "status", scanResult.status, "duration", duration.Round(time.Millisecond).String())
@@ -232,10 +256,23 @@ func customArgsContains(args []string, flag string) bool {
 // comment, so the message intentionally names the detected version
 // and the upgrade command.
 func checkOpenclawVersion(ctx context.Context, execPath string) error {
+	ctx, cancel := context.WithTimeout(ctx, openclawVersionTimeout)
+	defer cancel()
+
 	cmd := exec.CommandContext(ctx, execPath, "--version")
 	hideAgentWindow(cmd)
+	// exec.CommandContext only kills the direct child on timeout. If openclaw
+	// shells out to a helper that inherits our stdout/stderr pipes and hangs
+	// (e.g. blocked dialing an unreachable Gateway/PaperClip endpoint),
+	// cmd.CombinedOutput() blocks in Wait() until those pipes close,
+	// defeating the timeout above. WaitDelay forces the pipes shut shortly
+	// after the context fires so this call always returns.
+	cmd.WaitDelay = 2 * time.Second
 	out, err := cmd.CombinedOutput()
 	if err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			return fmt.Errorf("openclaw --version timed out after %s — the openclaw CLI (or a backend it depends on, e.g. Gateway/PaperClip) may be unreachable; check connectivity and try again", openclawVersionTimeout)
+		}
 		return fmt.Errorf("openclaw --version failed: %w", err)
 	}
 	detected, ok := parseOpenclawVersion(string(out))

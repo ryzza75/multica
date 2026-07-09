@@ -3,10 +3,12 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -1562,6 +1564,127 @@ func TestOpenclawExecuteAllowsCurrentVersion(t *testing.T) {
 	case result := <-session.Result:
 		if strings.Contains(result.Error, "openclaw update") {
 			t.Errorf("version gate fired for a current version: %q", result.Error)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("timeout waiting for result")
+	}
+}
+
+// TestOpenclawExecuteVersionCheckTimesOutOnHang guards against a wedged
+// `openclaw --version` probe stalling task dispatch forever — e.g. a build
+// that blocks trying to reach an unreachable Gateway/PaperClip endpoint
+// before it can print its version. Without a bound on the probe, Execute
+// would hang indefinitely (the outer ctx passed in has no deadline of its
+// own; opts.Timeout only bounds the run started after this check), making
+// an outage look like the daemon itself has stalled. The script also
+// backgrounds a child that inherits and holds stdout/stderr open after the
+// parent is killed, exercising the cmd.WaitDelay path.
+func TestOpenclawExecuteVersionCheckTimesOutOnHang(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("relies on a /bin/sh hang script")
+	}
+
+	orig := openclawVersionTimeout
+	openclawVersionTimeout = 200 * time.Millisecond
+	t.Cleanup(func() { openclawVersionTimeout = orig })
+
+	dir := t.TempDir()
+	fakePath := filepath.Join(dir, "openclaw")
+	pidFile := filepath.Join(dir, "child.pid")
+	script := fmt.Sprintf("#!/bin/sh\n"+
+		"if [ \"$1\" = \"--version\" ]; then\n"+
+		"  sleep 60 &\n"+
+		"  echo $! > %q\n"+
+		"  wait\n"+
+		"fi\n"+
+		"exit 0\n", pidFile)
+	writeTestExecutable(t, fakePath, []byte(script))
+	t.Cleanup(func() {
+		data, err := os.ReadFile(pidFile)
+		if err != nil {
+			return
+		}
+		pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+		if err != nil {
+			return
+		}
+		if proc, err := os.FindProcess(pid); err == nil {
+			_ = proc.Kill()
+		}
+	})
+
+	backend, err := New("openclaw", Config{ExecutablePath: fakePath, Logger: slog.Default()})
+	if err != nil {
+		t.Fatalf("new openclaw backend: %v", err)
+	}
+
+	done := make(chan error, 1)
+	start := time.Now()
+	go func() {
+		_, execErr := backend.Execute(context.Background(), "prompt-ignored", ExecOptions{})
+		done <- execErr
+	}()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("expected an error from a hanging --version probe, got nil")
+		}
+		if !strings.Contains(err.Error(), "timed out") {
+			t.Errorf("error should mention the timeout, got: %v", err)
+		}
+		if elapsed := time.Since(start); elapsed > 5*time.Second {
+			t.Errorf("probe took %s, want bounded by openclawVersionTimeout", elapsed)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Execute did not return within 5s of a hanging --version probe")
+	}
+}
+
+// TestOpenclawExecuteIncludesStderrTailOnFailure verifies that when the
+// openclaw process exits with an error, the stderr it wrote (e.g. a
+// connection-refused message from an unreachable Gateway/PaperClip
+// endpoint) is attached to Result.Error. Without this, a failed run looks
+// like the opaque "openclaw exited with error: exit status 1" with the
+// actual reason stuck in daemon logs.
+func TestOpenclawExecuteIncludesStderrTailOnFailure(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-script fixture is POSIX-only")
+	}
+
+	fakePath := filepath.Join(t.TempDir(), "openclaw")
+	script := "#!/bin/sh\n" +
+		"if [ \"$1\" = \"--version\" ]; then\n" +
+		"  echo 'openclaw 2026.5.5 c37871e'\n" +
+		"  exit 0\n" +
+		"fi\n" +
+		"echo 'dial tcp gateway.internal:8443: connect: connection refused' >&2\n" +
+		"exit 1\n"
+	writeTestExecutable(t, fakePath, []byte(script))
+
+	backend, err := New("openclaw", Config{ExecutablePath: fakePath, Logger: slog.Default()})
+	if err != nil {
+		t.Fatalf("new openclaw backend: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	session, err := backend.Execute(ctx, "prompt-ignored", ExecOptions{Timeout: 5 * time.Second})
+	if err != nil {
+		t.Fatalf("Execute returned synchronous error past the version gate: %v", err)
+	}
+	go func() {
+		for range session.Messages {
+		}
+	}()
+	select {
+	case result := <-session.Result:
+		if result.Status != "failed" {
+			t.Fatalf("status = %q, want failed", result.Status)
+		}
+		if !strings.Contains(result.Error, "connection refused") {
+			t.Errorf("Result.Error missing stderr tail, got: %q", result.Error)
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("timeout waiting for result")
